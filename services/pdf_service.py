@@ -1,14 +1,15 @@
-from fastapi import APIRouter, UploadFile, File, Form, Depends
+from fastapi import APIRouter, UploadFile, File, Form, Depends, Header
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi import HTTPException
 from pathlib import Path
 import shutil
 from datetime import datetime
+from typing import Optional
 
 from config import Settings, get_settings
 from .exceptions import InvalidSessionError, ThreadNotFoundError
-from .utils import validate_session, ensure_upload_dir
+from .utils import get_user_from_token, ensure_upload_dir
 from db_manager import (
     add_source_to_chat_session,
     add_filename_to_uploaded_list,
@@ -16,7 +17,7 @@ from db_manager import (
     get_chat_session_by_id,
     create_chat_session_in_db
 )
-from auth import active_sessions
+from auth import get_current_user
 import uuid
 from logging_config import get_logger, log_exceptions
 from callbacks import LoggingCallbackHandler
@@ -27,14 +28,14 @@ router = APIRouter(tags=["PDF Operations"])
 @router.post("/session")
 @log_exceptions
 async def create_chat_session(
-    session_id: str = Form(...),
+    current_user: str = Depends(get_current_user),
     settings: Settings = Depends(get_settings)
 ):
     """Create a new chat session"""
-    logger.info(f"Creating new chat session for session: {session_id}")
+    logger.info(f"Creating new chat session for user: {current_user}")
     
     try:
-        user_id = await validate_session(session_id, active_sessions)
+        user_id = current_user
         chat_session_id = str(uuid.uuid4())
         
         new_chat_session = {
@@ -63,14 +64,14 @@ async def create_chat_session(
 @log_exceptions
 async def get_chat_session(
     chat_session_id: str,
-    session_id: str,
+    current_user: str = Depends(get_current_user),
     settings: Settings = Depends(get_settings)
 ):
     """Get chat session details including updated title"""
     logger.info(f"Fetching chat session: {chat_session_id}")
     
     try:
-        user_id = await validate_session(session_id, active_sessions)
+        user_id = current_user
         chat_session_data = await get_chat_session_by_id(chat_session_id, user_id)
         
         if not chat_session_data:
@@ -96,17 +97,16 @@ async def get_chat_session(
 @log_exceptions
 async def upload_pdf(
     file: UploadFile = File(...),
-    session_id: str = Form(...),
     chat_session_id: str = Form(...),
+    current_user: str = Depends(get_current_user),
     settings: Settings = Depends(get_settings)
 ):
     """Handle PDF upload with improved error handling and logging"""
     logger.info(f"Processing PDF upload: {file.filename} for chat session {chat_session_id}")
     
     try:
-        logger.debug(f"Validating session: {session_id[:20]}...")
-        user_id = await validate_session(session_id, active_sessions)
-        logger.debug(f"Session valid, user_id: {user_id}")
+        user_id = current_user
+        logger.debug(f"Authenticated user_id: {user_id}")
         
         logger.debug(f"Fetching chat session: {chat_session_id}")
         chat_session_data = await get_chat_session_by_id(chat_session_id, user_id)

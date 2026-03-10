@@ -2,18 +2,22 @@ import os
 import json
 from typing import Any, Dict, Optional
 from pathlib import Path
-from fastapi import HTTPException, status
+from fastapi import HTTPException, status, Header
 from datetime import datetime
+import jwt
+from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 
 # centralized logging + decorator import
 from logging_config import get_logger, log_exceptions
-logger = get_logger(__name__)
+from config import get_settings
 
-# If you have helper functions that can raise, add @log_exceptions above them.
-# Example:
-# @log_exceptions
-# def some_helper(...):
-#     ...existing code...
+logger = get_logger(__name__)
+settings = get_settings()
+
+# JWT Configuration
+JWT_SECRET_KEY = settings.JWT_SECRET_KEY
+JWT_ALGORITHM = settings.JWT_ALGORITHM
+
 
 class RequestSimulator:
     """Utility class to simulate HTTP requests for service functions"""
@@ -23,42 +27,86 @@ class RequestSimulator:
     async def json(self) -> Dict[str, Any]:
         return self._json
 
-async def validate_session(session_id: str, active_sessions: Dict) -> str:
-    """Validate session and return user_id. Checks both in-memory and database."""
-    if not session_id:
-        logger.warning("Session validation failed: No session_id provided")
+
+def verify_jwt_token(token: str) -> str:
+    """Verify JWT token and return user_id"""
+    try:
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        
+        # Check token type
+        if payload.get("type") != "access":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token type",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+        
+        return user_id
+        
+    except ExpiredSignatureError:
+        logger.warning("Token has expired")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid session"
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    except InvalidTokenError as e:
+        logger.warning(f"Invalid token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+
+
+async def get_user_from_token(authorization: Optional[str] = Header(None)) -> str:
+    """Extract and validate user from Authorization header with JWT token"""
+    if not authorization:
+        logger.warning("Authorization header missing")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+            headers={"WWW-Authenticate": "Bearer"}
         )
     
-    # First check in-memory sessions (fast path)
-    if session_id in active_sessions:
-        logger.debug(f"Session found in memory: {session_id[:20]}...")
-        return active_sessions[session_id]["user_id"]
-    
-    # Fallback to database check (for sessions that survived server restart)
-    logger.debug(f"Session not in memory, checking database: {session_id[:20]}...")
     try:
-        from db_manager import get_session
-        session_data = await get_session(session_id)
-        if session_data and session_data.get("user_id"):
-            logger.info(f"Session found in database, re-populating cache: {session_id[:20]}...")
-            # Re-populate in-memory cache
-            active_sessions[session_id] = {
-                "user_id": session_data["user_id"],
-                "created_at": session_data.get("created_at", datetime.utcnow().isoformat())
-            }
-            return session_data["user_id"]
-        else:
-            logger.warning(f"Session not found in database: {session_id[:20]}...")
-    except Exception as e:
-        logger.error(f"Error validating session from database: {e}")
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication scheme. Use Bearer token",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization header format. Use: Bearer <token>",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
-    logger.warning(f"Session validation failed for: {session_id[:20]}...")
+    user_id = verify_jwt_token(token)
+    logger.debug(f"User authenticated from JWT: {user_id[:20]}...")
+    return user_id
+
+
+async def validate_session(session_id: str, active_sessions: Dict) -> str:
+    """
+    DEPRECATED: Session-based validation replaced with JWT tokens.
+    This function is kept for backward compatibility during migration.
+    Use get_user_from_token() instead for JWT-based authentication.
+    """
+    logger.warning("validate_session() is deprecated. Please use JWT token authentication.")
     raise HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
-        detail="Session expired or invalid. Please log in again."
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Session-based authentication is no longer supported. Please use JWT tokens."
     )
 
 def ensure_upload_dir(user_id: str, thread_id: str, source_id: str, base_dir: Path) -> Path:

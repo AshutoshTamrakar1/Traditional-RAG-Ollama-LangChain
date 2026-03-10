@@ -14,7 +14,6 @@ class MessageType(str, Enum):
     FEEDBACK = "message_feedback"
 
 class BaseRequest(BaseModel):
-    session_id: str = Field(..., description="Active session ID")
     thread_id: Optional[str] = Field(None, description="Thread ID")
     chat_session_id: Optional[str] = Field(None, description="Chat session ID (alias for thread_id)")
     source_id: Optional[str] = Field(None, description="Source document ID")
@@ -27,7 +26,6 @@ class BaseRequest(BaseModel):
         return values.get("chat_session_id")
 
 class ChatRequest(BaseModel):
-    session_id: str
     chat_session_id: str  # Make it required
     user_input: str
     active_source_ids: List[str] = []

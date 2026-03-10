@@ -154,29 +154,10 @@ _db_manager = MongoDBManager()
 # Export collection names as constants
 COLLECTION_USERS = "users"
 COLLECTION_CHAT_SESSIONS = "chat_sessions"
-COLLECTION_SESSIONS = "sessions"
 COLLECTION_PDF_METADATA = "pdf_metadata"
 
-# SESSION MANAGEMENT FUNCTIONS
-@log_exceptions
-async def create_session(session: Dict[str, Any]) -> None:
-    """Create a new session (login/session token)"""
-    session.setdefault("created_at", datetime.utcnow().isoformat())
-    session.setdefault("updated_at", datetime.utcnow().isoformat())
-    await _db_manager.db[COLLECTION_SESSIONS].insert_one(session)
-    logger.info(f"Session created: {session.get('session_id')}")
-
-@log_exceptions
-async def get_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """Get session by session_id"""
-    return await _db_manager.db[COLLECTION_SESSIONS].find_one({"session_id": session_id})
-
-@log_exceptions
-async def update_session(session_id: str, update: Dict[str, Any]) -> None:
-    """Update session fields"""
-    update["updated_at"] = datetime.utcnow().isoformat()
-    await _db_manager.db[COLLECTION_SESSIONS].update_one({"session_id": session_id}, {"$set": update})
-    logger.info(f"Session updated: {session_id}")
+# Note: Session management has been migrated to JWT tokens (stateless authentication)
+# The COLLECTION_SESSIONS and related functions have been removed
 
 # PDF METADATA FUNCTIONS
 @log_exceptions

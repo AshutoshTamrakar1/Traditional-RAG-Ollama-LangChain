@@ -29,9 +29,9 @@ A scalable, production-ready PDF chatbot system that enables users to upload PDF
 ### Key Characteristics
 - **Architecture Style**: Layered Architecture with Service-Oriented Design
 - **Communication**: RESTful APIs with async/await patterns
-- **Data Persistence**: MongoDB (user/session data) + ChromaDB (vector embeddings)
+- **Data Persistence**: MongoDB (user/chat data) + ChromaDB (vector embeddings)
 - **AI Models**: Local Ollama LLMs (llama3, gemma, phi3)
-- **Authentication**: Session-based with bcrypt password hashing
+- **Authentication**: Stateless JWT tokens with access & refresh tokens
 
 ---
 
@@ -49,7 +49,7 @@ A scalable, production-ready PDF chatbot system that enables users to upload PDF
 #### Responsibilities:
 - User input collection
 - Response rendering
-- Session state management
+- JWT token storage (localStorage/cookies)
 - File upload handling
 
 ---
@@ -95,7 +95,7 @@ Located in `services/` directory. Each service module handles a specific domain.
 **Key Operations:**
 ```python
 upload_pdf()
-  → validate_session()
+  → get_current_user() [JWT dependency]
   → ensure_upload_dir()
   → save_file_to_disk()
   → ai_engine._load_and_store_pdf()
@@ -119,7 +119,7 @@ upload_pdf()
 **Key Operations:**
 ```python
 send_chat()
-  → validate_session()
+  → get_current_user() [JWT dependency]
   → determine_chat_mode() 
      • No PDF: chat_completion_LlamaModel_ws()
      • Single PDF: chat_completion_with_pdf_ws()
@@ -143,7 +143,7 @@ send_chat()
 **Key Operations:**
 ```python
 generate_mindmap()
-  → validate_session()
+  → get_current_user() [JWT dependency]
   → estimate_generation_time()
   → ai_engine.generate_mindmap_from_pdf()
   → MindmapOutputParser.parse()
@@ -173,9 +173,12 @@ PDFBotException (base)
 
 **`utils.py`** - Utility Functions
 ```python
-validate_session()
+verify_jwt_token()        # Validates JWT and extracts user_id
+get_user_from_token()     # Gets user from Authorization header
 ensure_upload_dir()
 RequestSimulator (for testing)
+# Deprecated:
+validate_session()        # Raises error directing to JWT
 ```
 
 ---
@@ -630,21 +633,37 @@ def get_settings() → Settings (singleton)
 ## Security Architecture
 
 ### Authentication
-- **Session-based**: No JWT tokens
-- **Password Hashing**: Bcrypt with salt
-- **Session Storage**: MongoDB + in-memory cache
-- **Session Expiry**: 24 hours default
+- **JWT-based**: Stateless token authentication
+- **Token Types**:
+  - **Access Token**: Short-lived (60 minutes default), used for API authentication
+  - **Refresh Token**: Long-lived (7 days default), used to obtain new access tokens
+- **Password Hashing**: Bcrypt with salt (unchanged)
+- **Token Algorithm**: HS256 (HMAC with SHA-256)
+- **Secret Key**: 256-bit randomly generated (configurable via env var)
 
 ### Authorization
 - User-scoped resources (chat sessions, uploads)
-- Session validation on every request
-- Active sessions tracked in memory
+- JWT validation on every protected endpoint
+- Dependency injection pattern using `Depends(get_current_user)`
+- No server-side session storage (stateless)
+
+### Token Flow
+```
+1. Login/Register → Returns access_token + refresh_token
+2. Client stores tokens (localStorage or httpOnly cookies)
+3. API requests include: Authorization: Bearer <access_token>
+4. Server validates JWT signature and expiry
+5. On access_token expiry → Use refresh_token to get new access_token
+6. Logout → Client discards tokens (server-side logout optional)
+```
 
 ### Data Security
 - Passwords never stored in plaintext
+- JWT tokens signed with secret key (prevents tampering)
 - File uploads validated (PDF only)
 - MongoDB connections over authenticated channels
 - Environment variables for secrets
+- No session data stored server-side (horizontal scaling friendly)
 
 ---
 
@@ -652,15 +671,15 @@ def get_settings() → Settings (singleton)
 
 ### Current Limitations
 - Single-server deployment
-- In-memory session cache (not distributed)
 - Local Ollama models (not load-balanced)
 - File storage on disk (not object storage)
+- No distributed caching layer
 
 ### Scaling Strategies
 1. **Horizontal Scaling**:
-   - Deploy multiple FastAPI instances
-   - Use Redis for distributed session cache
+   - Deploy multiple FastAPI instances (stateless JWT enables this)
    - Load balancer (Nginx/HAProxy)
+   - No shared session state required (JWT FTW!)
 
 2. **Database Scaling**:
    - MongoDB replica sets

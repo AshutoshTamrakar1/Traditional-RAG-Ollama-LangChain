@@ -2,40 +2,39 @@ import os
 import uuid
 from datetime import datetime, timedelta
 from typing import Dict, Optional, Any
-from fastapi import APIRouter, HTTPException, status, Depends
-# run_in_threadpool is not used here after DB helpers migrated to async
+from fastapi import APIRouter, HTTPException, status, Depends, Header
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr, Field, field_validator, model_validator
 import bcrypt
+import jwt
+from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 from logging_config import get_logger, log_exceptions
 from db_manager import (
     create_user,
     get_user_by_id,
     update_user_last_login,
-    create_session as create_session_in_db,
-    get_session as get_session_from_db,
     COLLECTION_USERS
 )
+from config import get_settings
 
 logger = get_logger(__name__)
+settings = get_settings()
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# NOTE: We're using stateful sessions only (no JWT). Session persistence is
-# handled by the `sessions` collection via `db_manager`.
+# JWT Configuration from settings
+JWT_SECRET_KEY = settings.JWT_SECRET_KEY
+JWT_ALGORITHM = settings.JWT_ALGORITHM
+ACCESS_TOKEN_EXPIRE_MINUTES = settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES
+REFRESH_TOKEN_EXPIRE_DAYS = settings.JWT_REFRESH_TOKEN_EXPIRE_DAYS
 
-# Active sessions in memory (for quick lookup)
-# In production, use Redis or persistent store
-active_sessions: Dict[str, Dict[str, Any]] = {}
+# Security scheme
+security = HTTPBearer()
 
 # ============================================================================
 # PYDANTIC MODELS
-#
-# NOTE: This project uses Pydantic v2 style validators. The old `validator`
-# decorator from Pydantic v1 is deprecated — we use `field_validator` for
-# single-field validation and `model_validator` for cross-field checks (e.g.
-# password/confirm_password equality).
 # ============================================================================
 
 class UserRegisterRequest(BaseModel):
@@ -45,20 +44,17 @@ class UserRegisterRequest(BaseModel):
     password: str = Field(..., min_length=8, max_length=128)
     confirm_password: str = Field(..., min_length=8, max_length=128)
 
-    # Pydantic v2: use field_validator for single-field validation
     @field_validator("username")
     def validate_username(cls, v):
         """Validate username format"""
-        # allow alphanumeric characters or underscore or hyphen
-        if not v.isalnum() and "_" not in v and "-" not in v:
+        if not v.replace("_", "").replace("-", "").isalnum():
             raise ValueError("Username can only contain alphanumeric characters, underscores, and hyphens")
         return v
 
-    # Confirm password must match password — this is a cross-field validation
     @model_validator(mode="after")
     def validate_passwords_match(cls, model):
-        """Ensure passwords match (model-level validator)"""
-        if getattr(model, "password", None) is not None and getattr(model, "confirm_password", None) != model.password:
+        """Ensure passwords match"""
+        if getattr(model, "password", None) != getattr(model, "confirm_password", None):
             raise ValueError("Passwords do not match")
         return model
 
@@ -69,12 +65,23 @@ class UserLoginRequest(BaseModel):
     password: str
 
 
+class TokenResponse(BaseModel):
+    """Token response model"""
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int  # seconds
+
+
 class UserLoginResponse(BaseModel):
-    """User login response model (session-only auth)"""
+    """User login response model"""
     status: str
     message: str
     user_id: str
-    session_id: str
+    access_token: str
+    refresh_token: str
+    token_type: str = "bearer"
+    expires_in: int
 
 
 class UserRegisterResponse(BaseModel):
@@ -86,8 +93,9 @@ class UserRegisterResponse(BaseModel):
     username: str
 
 
-# Token refresh and verification endpoints have been removed because we
-# now rely on stateful sessions stored in the `sessions` collection.
+class TokenRefreshRequest(BaseModel):
+    """Token refresh request model"""
+    refresh_token: str
 
 
 class UserProfileResponse(BaseModel):
@@ -98,6 +106,13 @@ class UserProfileResponse(BaseModel):
     created_at: str
     last_login: Optional[str]
     active: bool
+
+
+class ChangePasswordRequest(BaseModel):
+    """Change password request model"""
+    old_password: str
+    new_password: str
+    confirm_password: str
 
 
 # ============================================================================
@@ -123,98 +138,142 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 # JWT TOKEN MANAGEMENT
 # ============================================================================
 
-# JWT token functions removed — session-only authentication is used
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    """Create JWT access token"""
+    to_encode = data.copy()
+    
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+    
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.utcnow(),
+        "type": "access"
+    })
+    
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return encoded_jwt
 
 
-# ============================================================================
-# SESSION MANAGEMENT
-# ============================================================================
+def create_refresh_token(data: dict) -> str:
+    """Create JWT refresh token"""
+    to_encode = data.copy()
+    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    
+    to_encode.update({
+        "exp": expire,
+        "iat": datetime.utcnow(),
+        "type": "refresh"
+    })
+    
+    encoded_jwt = jwt.encode(to_encode, JWT_SECRET_KEY, algorithm=JWT_ALGORITHM)
+    return encoded_jwt
 
-async def create_session(user_id: str) -> str:
-    """Create a new session for user (stores both in-memory and database)"""
-    session_id = str(uuid.uuid4())
-    
-    session_data = {
-        "session_id": session_id,
-        "user_id": user_id,
-        "created_at": datetime.utcnow().isoformat(),
-        "last_activity": datetime.utcnow().isoformat(),
-        "active": True
-    }
-    
-    # Store in memory for fast access
-    active_sessions[session_id] = session_data
-    
-    # Store in database for persistence (non-blocking)
+
+def decode_token(token: str) -> Dict[str, Any]:
+    """Decode and validate JWT token"""
     try:
-        # db_manager.create_session is async (Motor) so call directly
-        await create_session_in_db(session_data)
-    except Exception as e:
-        logger.error(f"Failed to store session in database: {e}")
-    
-    logger.info(f"Session created: {session_id} for user: {user_id}")
-    return session_id
+        payload = jwt.decode(token, JWT_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+        return payload
+    except ExpiredSignatureError:
+        logger.warning("Token has expired")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has expired",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    except InvalidTokenError as e:
+        logger.warning(f"Invalid token: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
 
 
-def get_session(session_id: str) -> Optional[Dict[str, Any]]:
-    """Get session details"""
-    return active_sessions.get(session_id)
+def verify_access_token(token: str) -> str:
+    """Verify access token and return user_id"""
+    payload = decode_token(token)
+    
+    if payload.get("type") != "access":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    
+    user_id: str = payload.get("sub")
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
+    
+    return user_id
 
 
-def validate_session(session_id: str) -> Optional[str]:
-    """Validate session and return user_id if valid"""
-    session = active_sessions.get(session_id)
+def verify_refresh_token(token: str) -> str:
+    """Verify refresh token and return user_id"""
+    payload = decode_token(token)
     
-    if session is None:
-        logger.warning(f"Session not found: {session_id}")
-        return None
+    if payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
-    if not session.get("active"):
-        logger.warning(f"Session is inactive: {session_id}")
-        return None
+    user_id: str = payload.get("sub")
+    if user_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token payload",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
-    # Update last activity
-    session["last_activity"] = datetime.utcnow().isoformat()
-    
-    return session.get("user_id")
+    return user_id
 
 
-def invalidate_session(session_id: str) -> None:
-    """Invalidate/logout session"""
-    if session_id in active_sessions:
-        active_sessions[session_id]["active"] = False
-        logger.info(f"Session invalidated: {session_id}")
+# ============================================================================
+# DEPENDENCY FUNCTIONS
+# ============================================================================
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    """Dependency to get current user from JWT token"""
+    token = credentials.credentials
+    user_id = verify_access_token(token)
+    return user_id
 
 
-def invalidate_all_user_sessions(user_id: str) -> None:
-    """Invalidate all sessions for a user (logout all devices)"""
-    invalidated_count = 0
-    for session_id, session_data in active_sessions.items():
-        if session_data.get("user_id") == user_id:
-            session_data["active"] = False
-            invalidated_count += 1
+async def get_current_user_from_header(authorization: Optional[str] = Header(None)) -> str:
+    """Alternative: Get current user from Authorization header"""
+    if not authorization:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authorization header missing",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
-    logger.info(f"Invalidated {invalidated_count} sessions for user: {user_id}")
-
-
-def cleanup_old_sessions(max_age_hours: int = 24) -> int:
-    """Remove old inactive sessions"""
-    cutoff_time = datetime.utcnow() - timedelta(hours=max_age_hours)
-    sessions_to_remove = []
+    try:
+        scheme, token = authorization.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication scheme",
+                headers={"WWW-Authenticate": "Bearer"}
+            )
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authorization header format",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
-    for session_id, session_data in active_sessions.items():
-        if not session_data.get("active"):
-            created_at = datetime.fromisoformat(session_data.get("created_at", ""))
-            if created_at < cutoff_time:
-                sessions_to_remove.append(session_id)
-    
-    for session_id in sessions_to_remove:
-        del active_sessions[session_id]
-    
-    if sessions_to_remove:
-        logger.info(f"Cleaned up {len(sessions_to_remove)} old sessions")
-    
-    return len(sessions_to_remove)
+    user_id = verify_access_token(token)
+    return user_id
 
 
 # ============================================================================
@@ -231,11 +290,12 @@ async def register(request: UserRegisterRequest):
     logger.info(f"Registration attempt for email: {request.email}")
     
     try:
-        # Normalize inputs (trim whitespace and lowercase email) and check if user already exists
         from db_manager import _db_manager
-        # Use async Motor client directly
+        
         email_clean = request.email.strip().lower()
         username_clean = request.username.strip()
+        
+        # Check if user already exists
         existing_user = await _db_manager.db[COLLECTION_USERS].find_one({
             "$or": [
                 {"email": email_clean},
@@ -270,7 +330,6 @@ async def register(request: UserRegisterRequest):
             "active": True
         }
         
-        # Use async Motor insert
         await _db_manager.db[COLLECTION_USERS].insert_one(user_doc)
         logger.info(f"User registered successfully: {user_id}")
         
@@ -295,14 +354,16 @@ async def register(request: UserRegisterRequest):
 @router.post("/login", response_model=UserLoginResponse)
 @log_exceptions
 async def login(request: UserLoginRequest):
-    """Login user and create session"""
+    """Login user and return JWT tokens"""
     logger.info(f"Login attempt for email: {request.email}")
     
     try:
-        # Normalize inputs and find user by email
         from db_manager import _db_manager
+        
         email_clean = request.email.strip().lower()
         password_clean = request.password.strip()
+        
+        # Find user by email
         user = await _db_manager.db[COLLECTION_USERS].find_one({"email": email_clean})
         
         if not user:
@@ -327,11 +388,14 @@ async def login(request: UserLoginRequest):
                 detail="Invalid email or password"
             )
         
-        # Create session (session-only authentication)
+        # Create JWT tokens
         user_id = user.get("user_id")
-        session_id = await create_session(user_id)
+        token_data = {"sub": user_id, "email": email_clean}
         
-        # Update last login (async DB update)
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token(token_data)
+        
+        # Update last login
         await update_user_last_login(user_id)
         
         logger.info(f"User logged in successfully: {user_id}")
@@ -340,7 +404,10 @@ async def login(request: UserLoginRequest):
             status="success",
             message="Login successful",
             user_id=user_id,
-            session_id=session_id
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60
         )
     
     except HTTPException:
@@ -353,94 +420,71 @@ async def login(request: UserLoginRequest):
         )
 
 
-# /refresh endpoint removed — using session-only authentication
+@router.post("/refresh", response_model=TokenResponse)
+@log_exceptions
+async def refresh_token(request: TokenRefreshRequest):
+    """Refresh access token using refresh token"""
+    logger.info("Token refresh attempt")
+    
+    try:
+        # Verify refresh token
+        user_id = verify_refresh_token(request.refresh_token)
+        
+        # Get user to ensure still active
+        user = await get_user_by_id(user_id)
+        if not user or not user.get("active"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found or inactive"
+            )
+        
+        # Create new tokens
+        token_data = {"sub": user_id, "email": user.get("email")}
+        access_token = create_access_token(token_data)
+        refresh_token = create_refresh_token(token_data)
+        
+        logger.info(f"Tokens refreshed for user: {user_id}")
+        
+        return TokenResponse(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            token_type="bearer",
+            expires_in=ACCESS_TOKEN_EXPIRE_MINUTES * 60
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Token refresh error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Token refresh failed"
+        )
 
 
 @router.post("/logout")
 @log_exceptions
-async def logout(session_id: str):
-    """Logout user and invalidate session"""
-    logger.info(f"Logout attempt for session: {session_id}")
+async def logout(current_user: str = Depends(get_current_user)):
+    """Logout user (client should discard tokens)"""
+    logger.info(f"Logout for user: {current_user}")
     
-    try:
-        # Validate session exists
-        user_id = validate_session(session_id)
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid session"
-            )
-        
-        # Invalidate session
-        invalidate_session(session_id)
-        logger.info(f"User logged out: {user_id}")
-        
-        return {
-            "status": "success",
-            "message": "Logged out successfully"
-        }
+    # In JWT, logout is handled client-side by discarding tokens
+    # Optionally, implement token blacklist for enhanced security
     
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Logout error: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Logout failed"
-        )
-
-
-@router.post("/logout-all")
-@log_exceptions
-async def logout_all(session_id: str):
-    """Logout from all devices (invalidate all user sessions)"""
-    logger.info(f"Logout all attempt for session: {session_id}")
-    
-    try:
-        # Validate session exists
-        user_id = validate_session(session_id)
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid session"
-            )
-        
-        # Invalidate all user sessions
-        invalidate_all_user_sessions(user_id)
-        logger.info(f"User logged out from all devices: {user_id}")
-        
-        return {
-            "status": "success",
-            "message": "Logged out from all devices successfully"
-        }
-    
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Logout all error: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Logout failed"
-        )
+    return {
+        "status": "success",
+        "message": "Logged out successfully. Please discard your tokens."
+    }
 
 
 @router.get("/profile", response_model=UserProfileResponse)
 @log_exceptions
-async def get_profile(session_id: str):
+async def get_profile(current_user: str = Depends(get_current_user)):
     """Get user profile information"""
-    logger.info(f"Profile request for session: {session_id}")
+    logger.info(f"Profile request for user: {current_user}")
     
     try:
-        # Validate session
-        user_id = validate_session(session_id)
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid session"
-            )
-        
-        # Get user from database
-        user = await get_user_by_id(user_id)
+        user = await get_user_by_id(current_user)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -466,53 +510,40 @@ async def get_profile(session_id: str):
         )
 
 
-# /verify-token endpoint removed — session-based auth does not use tokens
-
-
 @router.post("/change-password")
 @log_exceptions
 async def change_password(
-    session_id: str,
-    old_password: str,
-    new_password: str,
-    confirm_password: str
+    request: ChangePasswordRequest,
+    current_user: str = Depends(get_current_user)
 ):
     """Change user password"""
-    logger.info(f"Password change attempt for session: {session_id}")
+    logger.info(f"Password change attempt for user: {current_user}")
     
     try:
-        # Validate session
-        user_id = validate_session(session_id)
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Invalid session"
-            )
-        
         # Validate new passwords match
-        if new_password != confirm_password:
+        if request.new_password != request.confirm_password:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="New passwords do not match"
             )
         
         # Validate password length
-        if len(new_password) < 8:
+        if len(request.new_password) < 8:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Password must be at least 8 characters"
             )
         
         # Get user and verify old password
-        user = await get_user_by_id(user_id)
+        user = await get_user_by_id(current_user)
         if not user:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="User not found"
             )
         
-        if not verify_password(old_password, user.get("password_hash", "")):
-            logger.warning(f"Password change failed: invalid old password for {user_id}")
+        if not verify_password(request.old_password, user.get("password_hash", "")):
+            logger.warning(f"Password change failed: invalid old password for {current_user}")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid old password"
@@ -520,11 +551,10 @@ async def change_password(
         
         # Update password
         from db_manager import _db_manager
-        hashed_new_password = hash_password(new_password)
+        hashed_new_password = hash_password(request.new_password)
 
-        # Run update in threadpool
         await _db_manager.db[COLLECTION_USERS].update_one(
-            {"user_id": user_id},
+            {"user_id": current_user},
             {
                 "$set": {
                     "password_hash": hashed_new_password,
@@ -533,7 +563,7 @@ async def change_password(
             }
         )
         
-        logger.info(f"Password changed for user: {user_id}")
+        logger.info(f"Password changed for user: {current_user}")
         
         return {
             "status": "success",
@@ -550,6 +580,17 @@ async def change_password(
         )
 
 
+@router.post("/verify-token")
+@log_exceptions
+async def verify_token_endpoint(current_user: str = Depends(get_current_user)):
+    """Verify if token is valid"""
+    return {
+        "status": "success",
+        "message": "Token is valid",
+        "user_id": current_user
+    }
+
+
 # ============================================================================
 # HEALTH CHECK
 # ============================================================================
@@ -559,8 +600,9 @@ async def auth_health():
     """Health check endpoint"""
     return {
         "status": "healthy",
-        "active_sessions": len([s for s in active_sessions.values() if s.get("active")])
+        "auth_type": "JWT",
+        "token_expire_minutes": ACCESS_TOKEN_EXPIRE_MINUTES
     }
 
 
-logger.info("auth.py loaded successfully")
+logger.info("auth.py loaded successfully (JWT-based authentication)")

@@ -7,7 +7,7 @@ from datetime import datetime
 from config import Settings, get_settings
 from .models import MindmapRequest, MindmapResponse
 from .exceptions import ThreadNotFoundError, SourceNotFoundError
-from .utils import validate_session
+from .utils import get_user_from_token
 from db_manager import (
     update_source_field,
     get_chat_session_by_id
@@ -19,7 +19,7 @@ from ai_engine import (
 )
 from output_parsers import MindmapOutputParser, MindmapOutput
 from callbacks import create_callback_manager
-from auth import active_sessions
+from auth import get_current_user
 from logging_config import get_logger, log_exceptions
 
 logger = get_logger(__name__)
@@ -29,13 +29,14 @@ router = APIRouter(tags=["Mindmap Operations"])
 @log_exceptions
 async def generate_mindmap(
     request: MindmapRequest,
+    current_user: str = Depends(get_current_user),
     settings: Settings = Depends(get_settings)
 ) -> MindmapResponse:
     """Generate mindmap from PDF with improved error handling"""
     logger.info(f"Generating mindmap for chat session: {request.chat_session_id}, source: {request.source_id}")
     
     try:
-        user_id = await validate_session(request.session_id, active_sessions)
+        user_id = current_user
         chat_session_data = await get_chat_session_by_id(request.chat_session_id, user_id)
         
         if not chat_session_data:

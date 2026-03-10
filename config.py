@@ -57,6 +57,31 @@ class Settings(BaseSettings):
     )
     
     # ========================================================================
+    # JWT AUTHENTICATION SETTINGS
+    # ========================================================================
+    
+    JWT_SECRET_KEY: str = Field(
+        default="your-super-secret-jwt-key-change-this-in-production",
+        env="JWT_SECRET_KEY",
+        description="Secret key for JWT token encoding/decoding"
+    )
+    JWT_ALGORITHM: str = Field(
+        default="HS256",
+        env="JWT_ALGORITHM",
+        description="JWT algorithm (HS256, RS256, etc.)"
+    )
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = Field(
+        default=60,
+        env="JWT_ACCESS_TOKEN_EXPIRE_MINUTES",
+        description="Access token expiration time in minutes"
+    )
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = Field(
+        default=7,
+        env="JWT_REFRESH_TOKEN_EXPIRE_DAYS",
+        description="Refresh token expiration time in days"
+    )
+    
+    # ========================================================================
     # VECTOR STORE SETTINGS (ChromaDB)
     # ========================================================================
     
@@ -196,21 +221,6 @@ class Settings(BaseSettings):
     PODCAST_GENERATION_TIMEOUT_SECONDS: int = Field(
         default=600,
         env="PODCAST_GENERATION_TIMEOUT_SECONDS"
-    )
-    
-    # ========================================================================
-    # SESSION SETTINGS
-    # ========================================================================
-    
-    SESSION_CLEANUP_INTERVAL_HOURS: int = Field(
-        default=24,
-        env="SESSION_CLEANUP_INTERVAL_HOURS",
-        description="How often to clean up old sessions"
-    )
-    SESSION_MAX_AGE_HOURS: int = Field(
-        default=24,
-        env="SESSION_MAX_AGE_HOURS",
-        description="Maximum age for inactive sessions"
     )
     
     # ========================================================================

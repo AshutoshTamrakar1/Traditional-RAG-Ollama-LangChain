@@ -7,7 +7,7 @@ An enterprise-grade, production-ready PDF chatbot with **Retrieval-Augmented Gen
 This chatbot allows users to:
 - **Upload and query PDF documents** using natural language
 - **Multi-document RAG** - Ask questions across multiple PDFs simultaneously
-- **User authentication** with session management
+- **User authentication** with JWT tokens (stateless)
 - **Persistent conversation history** stored in MongoDB
 - **Multiple AI models** (Llama3, Gemma, Phi3) for different use cases
 - **Mindmap generation** from PDF content
@@ -46,7 +46,7 @@ This chatbot allows users to:
 │                            ⬇                                    │
 │  ┌──────────────────────────────────────────────────┐          │
 │  │          Auth Service (auth.py)                  │          │
-│  │  •User Registration  •Login  •Session Mgmt      │          │
+│  │  •User Registration  •Login  •JWT Tokens        │          │
 │  └──────────────────────────────────────────────────┘          │
 └─────────────────────────────────────────────────────────────────┘
                               ⬇
@@ -76,7 +76,7 @@ This chatbot allows users to:
 │  ┌────────────────────┐        ┌────────────────────┐          │
 │  │   db_manager.py    │        │ vectorstore_       │          │
 │  │                    │        │ manager.py         │          │
-│  │ •Users & Sessions  │        │                    │          │
+│  │ •Users             │        │                    │          │
 │  │ •Chat Sessions     │        │ •Document Storage  │          │
 │  │ •MongoDB Ops       │        │ •Similarity Search │          │
 │  └────────────────────┘        └────────────────────┘          │
@@ -88,8 +88,8 @@ This chatbot allows users to:
 │  │  MongoDB    │  │  ChromaDB   │  │ Ollama LLMs │            │
 │  │             │  │             │  │             │            │
 │  │ •Users      │  │ •Embeddings │  │ •llama3     │            │
-│  │ •Sessions   │  │ •Vectors    │  │ •gemma      │            │
-│  │ •Chat Hist. │  │ •Documents  │  │ •phi3       │            │
+│  │ •Chat Hist. │  │ •Vectors    │  │ •gemma      │            │
+│  │ •Documents  │  │ •Documents  │  │ •phi3       │            │
 │  └─────────────┘  └─────────────┘  └─────────────┘            │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -152,14 +152,15 @@ Organized in [services/](services/) directory:
 
 - **[auth.py](auth.py)**: Authentication & authorization
   - User registration/login
-  - Session management
+  - JWT token generation & validation
+  - Access token & refresh token support
   - Password hashing (bcrypt)
+  - Stateless authentication
 
 #### 5. **Data Access Layer**
 
 - **[db_manager.py](db_manager.py)**: MongoDB operations
   - User CRUD
-  - Session management
   - Chat session tracking
   - Async Motor client
 
@@ -187,7 +188,7 @@ Organized in [services/](services/) directory:
 ## 🚀 Features
 
 ### Core Features
-- ✅ **Multi-user authentication** with session-based auth
+- ✅ **Multi-user authentication** with JWT tokens (stateless)
 - ✅ **PDF upload & processing** with PyMuPDF
 - ✅ **Semantic search** using ChromaDB + HuggingFace embeddings
 - ✅ **RAG (Retrieval-Augmented Generation)** with context-aware responses
@@ -201,7 +202,7 @@ Organized in [services/](services/) directory:
 ### Advanced Features
 - 🔍 **LangChain LCEL** (Expression Language) chains
 - 📊 **Observability** with callbacks and performance monitoring
-- 🔐 **Secure password hashing** with bcrypt
+- 🔐 **Secure JWT authentication** with access & refresh tokens
 - 📝 **Automatic chat title generation**
 - 🎯 **Windowed memory** for conversation context
 - ⚡ **Async/await** throughout for high performance
@@ -225,7 +226,7 @@ Organized in [services/](services/) directory:
 - **sentence-transformers** - Semantic embeddings
 
 ### Databases
-- **MongoDB** (Motor) - User data, sessions, chat history
+- **MongoDB** (Motor) - User data, chat history, metadata
 - **ChromaDB** - Vector embeddings and documents
 
 ### PDF Processing
@@ -239,6 +240,8 @@ Organized in [services/](services/) directory:
 ### DevOps & Utilities
 - **python-dotenv** - Environment management
 - **bcrypt** - Password hashing
+- **PyJWT** - JWT token generation & validation
+- **python-jose[cryptography]** - Enhanced JWT support
 - **rich** - Enhanced terminal output
 
 ---
@@ -326,7 +329,7 @@ pdf-rag-chatbot-v1/
 ├── memory_manager.py         # Conversation history management
 ├── vectorstore_manager.py    # ChromaDB vector store operations
 ├── db_manager.py             # MongoDB database operations
-├── auth.py                   # Authentication & session management
+├── auth.py                   # Authentication & JWT token management
 ├── config.py                 # Configuration management
 ├── logging_config.py         # Logging configuration
 ├── requirements.txt          # Python dependencies
@@ -391,11 +394,19 @@ User → Chat Service → ai_engine.chat_with_multiple_pdfs()
 
 ## 🌐 API Endpoints
 
+**Authentication Required**: All endpoints (except `/auth/register` and `/auth/login`) require an `Authorization` header with a Bearer token:
+```
+Authorization: Bearer <access_token>
+```
+
 ### Authentication
 - `POST /auth/register` - Register new user
-- `POST /auth/login` - User login
+- `POST /auth/login` - User login (returns access & refresh tokens)
+- `POST /auth/refresh` - Refresh access token using refresh token
 - `POST /auth/logout` - User logout
-- `GET /auth/validate` - Validate session
+- `GET /auth/profile` - Get user profile
+- `POST /auth/change-password` - Change user password
+- `POST /auth/verify-token` - Verify JWT token validity
 
 ### PDF Operations
 - `POST /pdf/session` - Create chat session
@@ -421,6 +432,10 @@ User → Chat Service → ai_engine.chat_with_multiple_pdfs()
 |----------|---------|-------------|
 | `MONGODB_URI` | `mongodb://localhost:27017/chatbot` | MongoDB connection string |
 | `MONGODB_DB_NAME` | `pdf_rag_chatbot` | MongoDB database name |
+| `JWT_SECRET_KEY` | Auto-generated | Secret key for JWT token signing (256-bit) |
+| `JWT_ALGORITHM` | `HS256` | JWT signing algorithm |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | `60` | Access token expiry time (minutes) |
+| `JWT_REFRESH_TOKEN_EXPIRE_DAYS` | `7` | Refresh token expiry time (days) |
 | `CHROMA_PERSIST_DIR` | `./chroma_db` | ChromaDB storage directory |
 | `EMBEDDING_MODEL_NAME` | `all-MiniLM-L6-v2` | HuggingFace embedding model |
 | `HOST` | `0.0.0.0` | Server host |

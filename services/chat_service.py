@@ -6,7 +6,7 @@ from datetime import datetime
 from config import Settings, get_settings
 from .models import ChatRequest, ChatResponse
 from .exceptions import InvalidSessionError, ThreadNotFoundError
-from .utils import validate_session, handle_service_error
+from .utils import get_user_from_token, handle_service_error
 from db_manager import (
     add_turn_to_general_chat,
     add_turn_to_multi_source_chat,
@@ -28,7 +28,7 @@ from callbacks import (
     LoggingCallbackHandler
 )
 from output_parsers import TitleOutputParser, ChatTitle
-from auth import active_sessions
+from auth import get_current_user
 import uuid
 from logging_config import get_logger, log_exceptions
 
@@ -110,11 +110,12 @@ def process_chat_completion(
 @log_exceptions
 async def send_chat(
     request: ChatRequest,
+    current_user: str = Depends(get_current_user),
     settings: Settings = Depends(get_settings)
 ) -> ChatResponse:
     """Handle chat messages with model selection support (llama3, gemma). phi3 is reserved for podcast generation."""
     logger.info(f"Chat request received:")
-    logger.info(f"  - session_id: {request.session_id[:20] if request.session_id else 'None'}...")
+    logger.info(f"  - user_id: {current_user[:20] if current_user else 'None'}...")
     logger.info(f"  - chat_session_id: {request.chat_session_id}")
     logger.info(f"  - user_input: {request.user_input[:50] if request.user_input else 'None'}...")
     logger.info(f"  - active_source_ids: {request.active_source_ids}")
@@ -122,7 +123,7 @@ async def send_chat(
     logger.info(f"Processing chat request for chat session: {request.chat_session_id}; model={request.model}")
 
     try:
-        user_id = await validate_session(request.session_id, active_sessions)
+        user_id = current_user
         chat_session_data = await get_chat_session_by_id(request.chat_session_id, user_id)
 
         if not chat_session_data:

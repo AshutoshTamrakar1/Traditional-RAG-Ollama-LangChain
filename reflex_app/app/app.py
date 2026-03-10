@@ -7,8 +7,8 @@ BACKEND_URL = "http://localhost:8000"
 
 # Shared authentication data (simple approach for state sharing)
 class SharedAuth(rx.Base):
-    token: str = ""
-    session_id: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
     user_id: str = ""
 
 class AuthState(rx.State):
@@ -16,8 +16,8 @@ class AuthState(rx.State):
     password: str = ""
     email: str = ""
     confirm_password: str = ""
-    token: str = ""
-    session_id: str = ""
+    access_token: str = ""
+    refresh_token: str = ""
     user_id: str = ""
     error: str = ""
     success: str = ""
@@ -46,14 +46,15 @@ class AuthState(rx.State):
                 print(f"[LOGIN] Response status: {response.status_code}")
                 if response.status_code == 200:
                     data = response.json()
-                    # session-only auth: backend returns session_id and user_id
-                    self.session_id = data["session_id"]
+                    # JWT auth: backend returns access_token, refresh_token, and user_id
+                    self.access_token = data["access_token"]
+                    self.refresh_token = data["refresh_token"]
                     self.user_id = data["user_id"]
                     self.success = "Login successful!"
-                    print(f"[LOGIN SUCCESS] User {self.user_id} logged in, session: {self.session_id}")
+                    print(f"[LOGIN SUCCESS] User {self.user_id} logged in, token: {self.access_token[:20]}...")
                     
-                    # Redirect with session info in URL (will be picked up by MainState)
-                    yield rx.redirect(f"/chat?session_id={self.session_id}&user_id={self.user_id}")
+                    # Redirect with auth info in URL (will be picked up by MainState)
+                    yield rx.redirect(f"/chat?access_token={self.access_token}&refresh_token={self.refresh_token}&user_id={self.user_id}")
                 else:
                     error_data = response.json()
                     self.error = error_data.get("detail", "Login failed")
@@ -98,6 +99,10 @@ class AuthState(rx.State):
                 print(f"[REGISTER] Response status: {response.status_code}")
                 if response.status_code == 201:
                     data = response.json()
+                    # JWT auth: registration also returns tokens
+                    self.access_token = data.get("access_token", "")
+                    self.refresh_token = data.get("refresh_token", "")
+                    self.user_id = data.get("user_id", "")
                     self.success = f"Registration successful! Welcome {data['username']}"
                     print(f"[REGISTER SUCCESS] User {data['user_id']} registered")
                     # Clear form
@@ -105,8 +110,12 @@ class AuthState(rx.State):
                     self.username = ""
                     self.password = ""
                     self.confirm_password = ""
-                    # Redirect to login after 2 seconds
-                    yield rx.call_script("setTimeout(() => window.location.href = '/', 2000)")
+                    # Redirect to chat with auth tokens
+                    if self.access_token:
+                        yield rx.redirect(f"/chat?access_token={self.access_token}&refresh_token={self.refresh_token}&user_id={self.user_id}")
+                    else:
+                        # Fallback to login page if no tokens
+                        yield rx.call_script("setTimeout(() => window.location.href = '/', 2000)")
                 else:
                     error_data = response.json()
                     self.error = error_data.get("detail", "Registration failed")
@@ -117,9 +126,9 @@ class AuthState(rx.State):
 
 
 class MainState(rx.State):
-    # Authentication - will be set when redirected from login
-    token: str = ""
-    session_id: str = ""
+    # Authentication - JWT tokens
+    access_token: str = ""
+    refresh_token: str = ""
     user_id: str = ""
     
     # Chat sessions
@@ -152,11 +161,49 @@ class MainState(rx.State):
     available_models: list[str] = []
     selected_model: str = "llama3"
     
-    def set_auth_from_login(self, session_id: str, user_id: str):
-        """Called to set auth data from login page (session-only auth)"""
-        self.session_id = session_id
+    def get_auth_headers(self) -> dict:
+        """Get Authorization header with Bearer token for API requests"""
+        if not self.access_token:
+            return {}
+        return {"Authorization": f"Bearer {self.access_token}"}
+    
+    async def refresh_access_token(self) -> bool:
+        """Refresh access token using refresh token. Returns True if successful."""
+        if not self.refresh_token:
+            print("[REFRESH] No refresh token available")
+            return False
+        
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                print(f"[REFRESH] Refreshing access token")
+                response = await client.post(
+                    f"{BACKEND_URL}/auth/refresh",
+                    headers={"Authorization": f"Bearer {self.refresh_token}"}
+                )
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    self.access_token = data["access_token"]
+                    self.refresh_token = data.get("refresh_token", self.refresh_token)
+                    print(f"[REFRESH SUCCESS] Token refreshed")
+                    return True
+                else:
+                    print(f"[REFRESH ERROR] Failed with status {response.status_code}")
+                    # Refresh token expired or invalid, redirect to login
+                    self.access_token = ""
+                    self.refresh_token = ""
+                    self.user_id = ""
+                    return False
+        except Exception as e:
+            print(f"[REFRESH EXCEPTION] {e}")
+            return False
+    
+    def set_auth_from_login(self, access_token: str, refresh_token: str, user_id: str):
+        """Called to set auth data from login page (JWT auth)"""
+        self.access_token = access_token
+        self.refresh_token = refresh_token
         self.user_id = user_id
-        print(f"[MAIN] Auth set - session_id: {self.session_id}")
+        print(f"[MAIN] Auth set - access_token: {self.access_token[:20]}...")
     
     async def on_load(self):
         """Load user data when chat page loads"""
@@ -164,28 +211,28 @@ class MainState(rx.State):
         
         # Get auth from URL query params (passed from login)
         if self.router.page.params:
-            new_session = self.router.page.params.get("session_id", "")
-            if new_session and new_session != self.session_id:
+            new_access_token = self.router.page.params.get("access_token", "")
+            if new_access_token and new_access_token != self.access_token:
                 # New login detected - clear old state
-                print(f"[MAIN] New session detected, clearing old state")
-                self.session_id = new_session
+                print(f"[MAIN] New login detected, clearing old state")
+                self.access_token = new_access_token
+                self.refresh_token = self.router.page.params.get("refresh_token", "")
                 self.user_id = self.router.page.params.get("user_id", "")
-                # token removed in session-only flow
                 self.current_chat_id = ""  # Clear old chat
                 self.messages = []
                 self.chat_sessions = []
                 self.uploaded_pdfs = []
                 self.active_source_ids = []
-                print(f"[MAIN] Auth loaded from URL params - session_id: {self.session_id[:20] if self.session_id else 'None'}...")
+                print(f"[MAIN] Auth loaded from URL params - access_token: {self.access_token[:20]}...")
         
         # Load available models
         await self.load_available_models()
         
-        print(f"[MAIN] Current auth - session_id: {self.session_id[:20] if self.session_id else 'None'}...")
+        print(f"[MAIN] Current auth - access_token: {self.access_token[:20] if self.access_token else 'None'}...")
         
-        # If no session, user needs to login
-        if not self.session_id:
-            print("[MAIN] No session, redirecting to login")
+        # If no access token, user needs to login
+        if not self.access_token:
+            print("[MAIN] No access token, redirecting to login")
             yield rx.redirect("/")
             return
         
@@ -206,7 +253,7 @@ class MainState(rx.State):
                 print(f"[CREATE_CHAT] Sending request to {BACKEND_URL}/pdf/session")
                 response = await client.post(
                     f"{BACKEND_URL}/pdf/session",
-                    data={"session_id": self.session_id}
+                    headers=self.get_auth_headers()
                 )
                 
                 print(f"[CREATE_CHAT] Response status: {response.status_code}")
@@ -224,11 +271,17 @@ class MainState(rx.State):
                         "title": self.current_chat_title
                     })
                     print(f"[CREATE_CHAT SUCCESS] Created chat session: {self.current_chat_id}")
-                elif response.status_code == 403:
-                    # Session expired or invalid
-                    self.error = "Session expired. Please log in again."
-                    print("[CREATE_CHAT ERROR] Session expired")
-                    yield rx.redirect("/")
+                elif response.status_code == 401:
+                    # Token expired, try to refresh
+                    print("[CREATE_CHAT] Token expired, attempting refresh...")
+                    if await self.refresh_access_token():
+                        # Retry with new token
+                        await self.create_new_chat()
+                    else:
+                        # Refresh failed, redirect to login
+                        self.error = "Session expired. Please log in again."
+                        print("[CREATE_CHAT ERROR] Token refresh failed")
+                        yield rx.redirect("/")
                 else:
                     self.error = "Failed to create chat session"
                     print(f"[CREATE_CHAT ERROR] {self.error}")
@@ -260,13 +313,13 @@ class MainState(rx.State):
                     "file": (filename, file_data, "application/pdf")
                 }
                 form_data = {
-                    "session_id": self.session_id,
                     "chat_session_id": self.current_chat_id
                 }
                 
                 print(f"[UPLOAD] Sending to {BACKEND_URL}/pdf/upload")
                 response = await client.post(
                     f"{BACKEND_URL}/pdf/upload",
+                    headers=self.get_auth_headers(),
                     data=form_data,
                     files=files_data
                 )
@@ -284,6 +337,15 @@ class MainState(rx.State):
                     
                     self.show_upload = False
                     print(f"[UPLOAD SUCCESS] PDF uploaded: {new_source['filename']}")
+                elif response.status_code == 401:
+                    # Token expired, try to refresh
+                    print("[UPLOAD] Token expired, attempting refresh...")
+                    if await self.refresh_access_token():
+                        # Retry upload
+                        await self.upload_pdf(files)
+                    else:
+                        self.error = "Session expired. Please log in again."
+                        print("[UPLOAD ERROR] Token refresh failed")
                 else:
                     self.error = "Upload failed"
                     print(f"[UPLOAD ERROR] {self.error}")
@@ -302,7 +364,6 @@ class MainState(rx.State):
         try:
             async with httpx.AsyncClient(timeout=300.0) as client:
                 payload = {
-                    "session_id": self.session_id,
                     "chat_session_id": self.current_chat_id,
                     "source_id": source_id
                 }
@@ -310,6 +371,7 @@ class MainState(rx.State):
                 print(f"[MINDMAP] Sending request to {BACKEND_URL}/mindmap/generate")
                 response = await client.post(
                     f"{BACKEND_URL}/mindmap/generate",
+                    headers=self.get_auth_headers(),
                     json=payload
                 )
                 
@@ -321,6 +383,15 @@ class MainState(rx.State):
                     self.show_mindmap = True
                     self.selected_pdf_for_mindmap = source_id
                     print(f"[MINDMAP SUCCESS] Generated {len(self.mindmap_markdown)} chars")
+                elif response.status_code == 401:
+                    # Token expired, try to refresh
+                    print("[MINDMAP] Token expired, attempting refresh...")
+                    if await self.refresh_access_token():
+                        # Retry mindmap generation
+                        await self.generate_mindmap(source_id)
+                    else:
+                        self.error = "Session expired. Please log in again."
+                        print("[MINDMAP ERROR] Token refresh failed")
                 else:
                     self.error = f"Mindmap generation failed: {response.text}"
                     print(f"[MINDMAP ERROR] {self.error}")
@@ -455,7 +526,6 @@ class MainState(rx.State):
                 source_ids = list(self.active_source_ids) if self.active_source_ids else []
                 
                 payload = {
-                    "session_id": self.session_id,
                     "chat_session_id": self.current_chat_id,
                     "user_input": user_msg,
                     "active_source_ids": source_ids,
@@ -467,6 +537,7 @@ class MainState(rx.State):
                 
                 response = await client.post(
                     f"{BACKEND_URL}/chat/send",
+                    headers=self.get_auth_headers(),
                     json=payload
                 )
                 
@@ -480,6 +551,16 @@ class MainState(rx.State):
                     # Refresh chat title if this was the first message
                     if self.current_chat_title == "New Chat" and len(self.messages) == 2:
                         await self.refresh_chat_title()
+                elif response.status_code == 401:
+                    # Token expired, try to refresh
+                    print("[SEND_MSG] Token expired, attempting refresh...")
+                    if await self.refresh_access_token():
+                        # Retry send message
+                        self.user_input = user_msg  # Restore message
+                        await self.send_message()
+                    else:
+                        self.error = "Session expired. Please log in again."
+                        print("[SEND_MSG ERROR] Token refresh failed")
                 else:
                     error_data = response.json()
                     self.error = error_data.get("detail", "Failed to send message")
@@ -515,25 +596,25 @@ class MainState(rx.State):
         print(f"[MODEL] Selected: {model}")
     
     async def logout(self):
-        """Logout user and end session on backend"""
+        """Logout user and invalidate JWT tokens on backend"""
         print(f"[LOGOUT] Logging out user")
         
-        # Call backend to invalidate session
-        if self.session_id:
+        # Call backend to invalidate tokens (optional - JWT is stateless)
+        if self.access_token:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.post(
                         f"{BACKEND_URL}/auth/logout",
-                        params={"session_id": self.session_id}
+                        headers=self.get_auth_headers()
                     )
                     print(f"[LOGOUT] Backend response: {response.status_code}")
             except Exception as e:
                 print(f"[LOGOUT ERROR] {e}")
         
         # Clear frontend state
-        self.session_id = ""
+        self.access_token = ""
+        self.refresh_token = ""
         self.user_id = ""
-        self.token = ""
         self.current_chat_id = ""
         self.messages = []
         self.chat_sessions = []
@@ -547,7 +628,7 @@ class MainState(rx.State):
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.get(
                     f"{BACKEND_URL}/pdf/session/{self.current_chat_id}",
-                    params={"session_id": self.session_id}
+                    headers=self.get_auth_headers()
                 )
                 if response.status_code == 200:
                     data = response.json()
@@ -559,6 +640,12 @@ class MainState(rx.State):
                             if session.get("chat_session_id") == self.current_chat_id:
                                 session["title"] = new_title
                         print(f"[TITLE] Updated to: {new_title}")
+                elif response.status_code == 401:
+                    # Token expired, try to refresh
+                    print("[TITLE] Token expired, attempting refresh...")
+                    if await self.refresh_access_token():
+                        # Retry
+                        await self.refresh_chat_title()
         except Exception as e:
             print(f"[TITLE ERROR] {e}")
 
