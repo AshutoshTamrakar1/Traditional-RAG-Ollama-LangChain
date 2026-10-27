@@ -224,7 +224,8 @@ def create_rag_chain(
     model_name: str = "llama3",
     k: int = 3,
     callbacks: Optional[List[BaseCallbackHandler]] = None,
-    enable_observability: bool = False
+    enable_observability: bool = False,
+    history: Optional[List] = None
 ):
     """
     Create a RAG chain using LCEL with ChromaDB retriever.
@@ -264,7 +265,7 @@ def create_rag_chain(
         {
             "context": retriever | RunnableLambda(format_docs),
             "input": RunnablePassthrough(),
-            "chat_history": lambda x: []  # No history for simple RAG
+            "chat_history": lambda x: format_chat_history(history or [])
         }
         | RAG_PROMPT_TEMPLATE
         | llm
@@ -348,7 +349,8 @@ def create_multi_pdf_rag_chain(
     model_name: str = "llama3",
     k: int = 2,
     callbacks: Optional[List[BaseCallbackHandler]] = None,
-    enable_observability: bool = False
+    enable_observability: bool = False,
+    history: Optional[List] = None
 ):
     """
     Create a multi-PDF RAG chain using LCEL.
@@ -403,7 +405,7 @@ def create_multi_pdf_rag_chain(
         {
             "context": RunnableLambda(retrieve_from_multiple),
             "input": RunnablePassthrough(),
-            "chat_history": lambda x: []
+            "chat_history": lambda x: format_chat_history(history or [])
         }
         | MULTI_PDF_RAG_PROMPT_TEMPLATE
         | llm

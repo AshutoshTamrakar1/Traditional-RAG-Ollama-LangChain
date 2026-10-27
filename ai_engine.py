@@ -128,15 +128,18 @@ def estimate_podcast_generation_time(mindmap_md: str) -> int:
 
 # --- RAG Helper Functions ---
 def _get_collection_name(pdf_path: str) -> str:
-    """Generate a collection name from PDF path (use source_id or sanitized filename)."""
-    # Use basename without extension as collection name
-    basename = os.path.splitext(os.path.basename(pdf_path))[0]
+    """Generate a unique ChromaDB collection name for a PDF.
+
+    Uploaded files live in ``uploads/<user>/<chat_session>/<source_id>/<file>.pdf`` so the
+    parent directory (source_id) is unique per upload. Using the bare filename caused two
+    different users/sessions uploading ``report.pdf`` to share (and mix) one collection.
+    """
+    source_dir = os.path.basename(os.path.dirname(os.path.abspath(pdf_path)))
+    base = source_dir or os.path.splitext(os.path.basename(pdf_path))[0]
     # Sanitize: replace non-alphanumeric with underscore
-    sanitized = ''.join(c if c.isalnum() else '_' for c in basename)
+    sanitized = ''.join(c if c.isalnum() else '_' for c in base)
     # ChromaDB collection names must be 3-63 chars, start/end with alphanumeric
-    collection_name = sanitized[:63].strip('_')
-    if len(collection_name) < 3:
-        collection_name = f"pdf_{collection_name}"
+    collection_name = f"src_{sanitized}"[:63].strip('_')
     return collection_name
 
 def _load_and_store_pdf(pdf_path: str) -> str:
@@ -323,7 +326,8 @@ async def chat_completion_with_pdf_ws(
                 chain = create_rag_chain(
                     collection_name=collection_name,
                     model_name=model,
-                    k=3
+                    k=3,
+                    history=history[-(HISTORY_LENGTH * 2):]
                 )
                 chain_input = text
             
@@ -355,7 +359,8 @@ async def chat_completion_with_multiple_pdfs_ws(
     text: str,
     history: List[Dict[str, str]],
     pdf_paths: List[str],
-    session_id: Optional[str] = None
+    session_id: Optional[str] = None,
+    model: str = "llama3"
 ) -> AsyncGenerator[Tuple[Optional[str], Optional[str]], None]:
     """Multi-PDF RAG completion using LCEL chain."""
     logger.info(f"Initiating Multi-PDF RAG (LCEL) for text: {text[:50]}... on {len(pdf_paths)} documents.")
@@ -384,7 +389,7 @@ async def chat_completion_with_multiple_pdfs_ws(
                 chain = create_multi_pdf_rag_chain_with_history(
                     collection_names=collection_names,
                     session_id=session_id,
-                    model_name="llama3",
+                    model_name=model,
                     k=2
                 )
                 chain_input = {"input": text}
@@ -392,8 +397,9 @@ async def chat_completion_with_multiple_pdfs_ws(
                 from chains import create_multi_pdf_rag_chain
                 chain = create_multi_pdf_rag_chain(
                     collection_names=collection_names,
-                    model_name="llama3",
-                    k=2
+                    model_name=model,
+                    k=2,
+                    history=history[-(HISTORY_LENGTH * 2):]
                 )
                 chain_input = text
             

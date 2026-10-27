@@ -300,9 +300,22 @@ class MainState(rx.State):
             self.is_loading = False
             return
         
+        # Ensure an active chat session exists before uploading
+        if not self.current_chat_id:
+            print("[UPLOAD] No active chat session, creating one first...")
+            await self.create_new_chat()
+            if not self.current_chat_id:
+                self.error = "Please start a chat session before uploading"
+                self.is_loading = False
+                return
+        
         try:
             file = files[0]
-            filename = file.filename if hasattr(file, 'filename') else str(file)
+            raw_filename = getattr(file, "filename", None) or getattr(file, "name", None) or ""
+            # Strip directory prefixes for cross-platform safety
+            filename = raw_filename.replace("\\", "/").split("/")[-1]
+            if not filename or not filename.lower().endswith(".pdf"):
+                filename = (filename or "document") + ".pdf"
             print(f"[UPLOAD] Processing file: {filename}")
             
             # Read file content
@@ -328,14 +341,15 @@ class MainState(rx.State):
                 if response.status_code == 200:
                     data = response.json()
                     new_source = data["new_source"]
-                    self.uploaded_pdfs.append(new_source)
-                    self.active_source_ids.append(new_source["source_id"])
+                    self.uploaded_pdfs = [*self.uploaded_pdfs, new_source]
+                    self.active_source_ids = [*self.active_source_ids, new_source["source_id"]]
                     
                     # Update title if changed
                     if data.get("new_title"):
                         self.current_chat_title = data["new_title"]
                     
                     self.show_upload = False
+                    self.error = ""
                     print(f"[UPLOAD SUCCESS] PDF uploaded: {new_source['filename']}")
                 elif response.status_code == 401:
                     # Token expired, try to refresh
@@ -347,7 +361,12 @@ class MainState(rx.State):
                         self.error = "Session expired. Please log in again."
                         print("[UPLOAD ERROR] Token refresh failed")
                 else:
-                    self.error = "Upload failed"
+                    detail = ""
+                    try:
+                        detail = response.json().get("detail", "")
+                    except Exception:
+                        pass
+                    self.error = f"Upload failed: {detail}" if detail else "Upload failed"
                     print(f"[UPLOAD ERROR] {self.error}")
         except Exception as e:
             self.error = f"Upload error: {str(e)}"
@@ -503,6 +522,7 @@ class MainState(rx.State):
         """Handle file upload from rx.upload component"""
         print(f"[HANDLE_UPLOAD] Files received: {files}")
         await self.upload_pdf(files)
+        return rx.clear_selected_files("pdf_upload")
     
     async def send_message(self):
         """Send chat message"""
@@ -517,7 +537,7 @@ class MainState(rx.State):
         self.user_input = ""
         
         # Add user message to UI immediately
-        self.messages.append({"role": "user", "content": user_msg})
+        self.messages = [*self.messages, {"role": "user", "content": user_msg}]
         self.is_loading = True
         
         try:
@@ -545,7 +565,7 @@ class MainState(rx.State):
                 if response.status_code == 200:
                     data = response.json()
                     assistant_msg = data["answer"]
-                    self.messages.append({"role": "assistant", "content": assistant_msg})
+                    self.messages = [*self.messages, {"role": "assistant", "content": assistant_msg}]
                     print(f"[SEND_MSG SUCCESS] Got response: {assistant_msg[:50]}...")
                     
                     # Refresh chat title if this was the first message
@@ -605,7 +625,8 @@ class MainState(rx.State):
                 async with httpx.AsyncClient(timeout=10.0) as client:
                     response = await client.post(
                         f"{BACKEND_URL}/auth/logout",
-                        headers=self.get_auth_headers()
+                        headers=self.get_auth_headers(),
+                        json={"refresh_token": self.refresh_token or None}
                     )
                     print(f"[LOGOUT] Backend response: {response.status_code}")
             except Exception as e:
@@ -1047,37 +1068,78 @@ def chat_page():
             rx.box(
                 rx.box(
                     rx.vstack(
-                        rx.heading("Upload PDF", size="6"),
+                        rx.hstack(
+                            rx.heading("Upload PDF Document", size="5"),
+                            rx.spacer(),
+                            rx.button("✕", on_click=MainState.toggle_upload, variant="ghost", size="2"),
+                            width="100%",
+                            align="center",
+                        ),
                         rx.upload(
-                            rx.button("Select PDF File", color="black"),
+                            rx.vstack(
+                                rx.button("Choose PDF File", color_scheme="blue", size="2"),
+                                rx.text("or drag & drop PDF here", size="2", color="gray"),
+                                align="center",
+                                spacing="2",
+                            ),
                             id="pdf_upload",
                             accept={"application/pdf": [".pdf"]},
+                            border="2px dashed #cbd5e1",
+                            padding="1.5em",
+                            border_radius="8px",
+                            width="100%",
                         ),
-                        rx.button(
-                            "Upload",
-                            on_click=MainState.handle_upload(rx.upload_files(upload_id="pdf_upload")),
-                            color="black",
+                        rx.hstack(
+                            rx.foreach(
+                                rx.selected_files("pdf_upload"),
+                                lambda file: rx.badge(file, color_scheme="blue", size="2"),
+                            ),
+                            spacing="2",
+                            wrap="wrap",
                         ),
-                        rx.button(
-                            "Close",
-                            on_click=MainState.toggle_upload,
-                            color="black",
+                        rx.cond(
+                            MainState.error != "",
+                            rx.text(MainState.error, color="red", size="2"),
+                        ),
+                        rx.hstack(
+                            rx.button(
+                                "Upload & Process",
+                                on_click=MainState.handle_upload(rx.upload_files(upload_id="pdf_upload")),
+                                is_loading=MainState.is_loading,
+                                loading_text="Uploading...",
+                                color_scheme="blue",
+                                size="2",
+                            ),
+                            rx.button(
+                                "Cancel",
+                                on_click=MainState.toggle_upload,
+                                variant="soft",
+                                size="2",
+                            ),
+                            spacing="3",
+                            justify="end",
+                            width="100%",
                         ),
                         spacing="3",
+                        width="100%",
                     ),
                     bg="white",
                     color="gray.800",
                     padding="2em",
-                    border_radius="0.5em",
-                    box_shadow="lg",
+                    border_radius="12px",
+                    box_shadow="0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04)",
+                    max_width="480px",
+                    width="90%",
                 ),
                 position="fixed",
-                top="50%",
-                left="50%",
-                transform="translate(-50%, -50%)",
-                bg="rgba(0,0,0,0.5)",
+                top="0",
+                left="0",
                 width="100vw",
                 height="100vh",
+                bg="rgba(0,0,0,0.5)",
+                display="flex",
+                align_items="center",
+                justify_content="center",
                 z_index="1000",
             )
         ),

@@ -8,6 +8,7 @@ This module provides:
 """
 
 import logging
+import re
 import json
 from typing import Optional, List, Dict, Any
 from datetime import datetime
@@ -95,6 +96,76 @@ class MindmapOutput(BaseModel):
             # If can't fix, prepend mindmap
             return "mindmap\n" + v
         return v
+
+    @property
+    def node_count(self) -> int:
+        """Number of nodes (non-empty lines after the leading 'mindmap' keyword)."""
+        lines = [l for l in self.markdown.splitlines() if l.strip()]
+        return max(len(lines) - 1, 0)
+
+    @property
+    def is_valid(self) -> bool:
+        """A mindmap is valid if it starts with 'mindmap' and has at least one node."""
+        return self.markdown.strip().lower().startswith("mindmap") and self.node_count > 0
+
+
+def _clean_mindmap_label(label: str) -> str:
+    """Remove characters that break Mermaid mindmap node text."""
+    return re.sub(r'[(){}\[\]"`]', '', label).strip().strip("'").strip()
+
+
+def normalize_mindmap(text: str) -> str:
+    """Turn raw LLM output into valid, indentation-based Mermaid mindmap syntax.
+
+    Handles markdown code fences, trailing prose, and the brace-style pseudo syntax
+    (``branch "Title" { ... }``) that small models often produce.
+    """
+    t = (text or "").strip()
+    fenced = re.search(r"```(?:mermaid)?\s*\n(.*?)```", t, re.S)
+    if fenced:
+        t = fenced.group(1)
+    else:
+        t = t.replace("```mermaid", "").replace("```", "")
+
+    lines = [l.rstrip() for l in t.splitlines() if l.strip()]
+    # Discard anything before the 'mindmap' keyword line
+    start = next((i for i, l in enumerate(lines) if l.strip().lower().startswith("mindmap")), None)
+    if start is not None:
+        lines = lines[start:]
+        rest = lines[0].strip()[len("mindmap"):].strip()
+        lines = ([rest] if rest else []) + lines[1:]
+
+    if any("{" in l or l.strip() in ("}", "},") for l in lines):
+        items = []
+        depth = 0
+        for l in lines:
+            s = l.strip()
+            if s in ("}", "},"):
+                depth = max(0, depth - 1)
+                continue
+            opens = s.endswith("{")
+            if opens:
+                s = s[:-1].strip()
+            quoted = re.findall(r'"([^"]+)"', s)
+            label = _clean_mindmap_label(quoted[-1] if quoted else s)
+            if label:
+                items.append((depth, label))
+            if opens:
+                depth += 1
+        if not items:
+            return "mindmap\n  root((Document))"
+        if sum(1 for d, _ in items if d == 0) > 1:
+            items = [(d + 1, lab) for d, lab in items]
+            items.insert(0, (0, "Document"))
+        out = ["mindmap"]
+        for i, (d, lab) in enumerate(items):
+            out.append("  " * (d + 1) + (f"root(({lab}))" if i == 0 else lab))
+        return "\n".join(out)
+
+    body = [l for l in lines]
+    if not body:
+        return "mindmap\n  root((Document))"
+    return "mindmap\n" + "\n".join(body)
 
 
 class ChatMetadata(BaseModel):
@@ -225,29 +296,14 @@ class MindmapOutputParser(PydanticOutputParser):
         super().__init__(pydantic_object=MindmapOutput)
     
     def parse(self, text: str) -> MindmapOutput:
-        """Parse mindmap with fallback to markdown-only."""
-        try:
-            return super().parse(text)
-        except Exception as e:
-            logger.warning(f"Structured mindmap parsing failed: {e}. Using markdown extraction.")
-            
-            # Extract mindmap markdown
-            markdown = text.strip()
-            
-            # Ensure it starts with 'mindmap'
-            if not markdown.lower().startswith("mindmap"):
-                if "mindmap" in markdown.lower():
-                    lines = markdown.split('\n')
-                    mindmap_idx = next(
-                        (i for i, line in enumerate(lines) if line.strip().lower() == "mindmap"),
-                        None
-                    )
-                    if mindmap_idx is not None:
-                        markdown = '\n'.join(lines[mindmap_idx:])
-                else:
-                    markdown = "mindmap\n" + markdown
-            
-            return MindmapOutput(markdown=markdown)
+        """Parse mindmap output. JSON is only attempted when the text looks like JSON;
+        otherwise the text is normalized into valid Mermaid mindmap syntax."""
+        if text.lstrip().startswith("{") and '"markdown"' in text:
+            try:
+                return super().parse(text)
+            except Exception as e:
+                logger.warning(f"Structured mindmap parsing failed: {e}. Using markdown normalization.")
+        return MindmapOutput(markdown=normalize_mindmap(text))
 
 
 class RAGResponseParser(PydanticOutputParser):

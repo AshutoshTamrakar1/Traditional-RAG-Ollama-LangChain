@@ -13,6 +13,8 @@ from db_manager import (
     create_user,
     get_user_by_id,
     update_user_last_login,
+    revoke_token,
+    is_token_revoked,
     COLLECTION_USERS
 )
 from config import get_settings
@@ -98,6 +100,11 @@ class TokenRefreshRequest(BaseModel):
     refresh_token: str
 
 
+class LogoutRequest(BaseModel):
+    """Optional logout body; pass the refresh token to revoke it too"""
+    refresh_token: Optional[str] = None
+
+
 class UserProfileResponse(BaseModel):
     """User profile response model"""
     user_id: str
@@ -150,6 +157,7 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode.update({
         "exp": expire,
         "iat": datetime.utcnow(),
+        "jti": str(uuid.uuid4()),
         "type": "access"
     })
     
@@ -165,6 +173,7 @@ def create_refresh_token(data: dict) -> str:
     to_encode.update({
         "exp": expire,
         "iat": datetime.utcnow(),
+        "jti": str(uuid.uuid4()),
         "type": "refresh"
     })
     
@@ -241,10 +250,20 @@ def verify_refresh_token(token: str) -> str:
 # DEPENDENCY FUNCTIONS
 # ============================================================================
 
+def _revoked_error() -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Token has been revoked",
+        headers={"WWW-Authenticate": "Bearer"}
+    )
+
+
 async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """Dependency to get current user from JWT token"""
+    """Dependency to get current user from JWT token (rejects revoked tokens)"""
     token = credentials.credentials
     user_id = verify_access_token(token)
+    if await is_token_revoked(decode_token(token).get("jti")):
+        raise _revoked_error()
     return user_id
 
 
@@ -273,6 +292,8 @@ async def get_current_user_from_header(authorization: Optional[str] = Header(Non
         )
     
     user_id = verify_access_token(token)
+    if await is_token_revoked(decode_token(token).get("jti")):
+        raise _revoked_error()
     return user_id
 
 
@@ -422,13 +443,31 @@ async def login(request: UserLoginRequest):
 
 @router.post("/refresh", response_model=TokenResponse)
 @log_exceptions
-async def refresh_token(request: TokenRefreshRequest):
-    """Refresh access token using refresh token"""
+async def refresh_token(
+    request: Optional[TokenRefreshRequest] = None,
+    authorization: Optional[str] = Header(None)
+):
+    """Refresh access token using refresh token (JSON body or `Authorization: Bearer <refresh>`)"""
     logger.info("Token refresh attempt")
+
+    raw_refresh = request.refresh_token if request else None
+    if not raw_refresh and authorization:
+        parts = authorization.split()
+        if len(parts) == 2 and parts[0].lower() == "bearer":
+            raw_refresh = parts[1]
+    if not raw_refresh:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token missing",
+            headers={"WWW-Authenticate": "Bearer"}
+        )
     
     try:
-        # Verify refresh token
-        user_id = verify_refresh_token(request.refresh_token)
+        # Verify refresh token (and that it has not been revoked / already used)
+        user_id = verify_refresh_token(raw_refresh)
+        old_payload = decode_token(raw_refresh)
+        if await is_token_revoked(old_payload.get("jti")):
+            raise _revoked_error()
         
         # Get user to ensure still active
         user = await get_user_by_id(user_id)
@@ -442,6 +481,13 @@ async def refresh_token(request: TokenRefreshRequest):
         token_data = {"sub": user_id, "email": user.get("email")}
         access_token = create_access_token(token_data)
         refresh_token = create_refresh_token(token_data)
+
+        # Rotate: the used refresh token can no longer be replayed
+        if old_payload.get("jti") and old_payload.get("exp"):
+            await revoke_token(
+                old_payload["jti"],
+                datetime.utcfromtimestamp(old_payload["exp"])
+            )
         
         logger.info(f"Tokens refreshed for user: {user_id}")
         
@@ -464,16 +510,29 @@ async def refresh_token(request: TokenRefreshRequest):
 
 @router.post("/logout")
 @log_exceptions
-async def logout(current_user: str = Depends(get_current_user)):
-    """Logout user (client should discard tokens)"""
+async def logout(
+    body: Optional[LogoutRequest] = None,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    current_user: str = Depends(get_current_user)
+):
+    """Logout user: revokes the access token (and the refresh token if supplied)"""
     logger.info(f"Logout for user: {current_user}")
-    
-    # In JWT, logout is handled client-side by discarding tokens
-    # Optionally, implement token blacklist for enhanced security
-    
+
+    tokens = [credentials.credentials]
+    if body and body.refresh_token:
+        tokens.append(body.refresh_token)
+
+    for tok in tokens:
+        try:
+            payload = decode_token(tok)
+        except HTTPException:
+            continue  # expired/invalid tokens need no revocation
+        if payload.get("sub") == current_user and payload.get("jti") and payload.get("exp"):
+            await revoke_token(payload["jti"], datetime.utcfromtimestamp(payload["exp"]))
+
     return {
         "status": "success",
-        "message": "Logged out successfully. Please discard your tokens."
+        "message": "Logged out successfully. Tokens revoked."
     }
 
 

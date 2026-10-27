@@ -69,6 +69,15 @@ async def health_check():
 async def root():
     return {"message": "Welcome to  PDF Reader API"}
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Graceful shutdown: close MongoDB connection"""
+    try:
+        logger.info("Shutting down — closing MongoDB connection")
+        await _db_manager.close()
+    except Exception as e:
+        logger.error(f"Error while closing MongoDB connection: {e}")
+
 # Add server startup code
 if __name__ == "__main__":
     import uvicorn
@@ -84,14 +93,4 @@ if __name__ == "__main__":
         reload=False,  # Disabled reload to prevent constant reloading
         timeout_keep_alive=600,  # 10 minutes keep-alive for long operations
         log_level="info"
-    )
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    """Graceful shutdown: close MongoDB connection"""
-    try:
-        logger.info("Shutting down — closing MongoDB connection")
-        await _db_manager.close()
-    except Exception as e:
-        logger.error(f"Error while closing MongoDB connection: {e}")
+    )

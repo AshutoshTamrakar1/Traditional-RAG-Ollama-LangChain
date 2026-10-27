@@ -126,6 +126,11 @@ class MongoDBManager:
             # Create indexes for pdf metadata
             await self._db.pdf_metadata.create_index("pdf_id", unique=True)
             await self._db.pdf_metadata.create_index("uploaded_at", background=True)
+
+            # Revoked JWTs (logout / refresh rotation). TTL index removes entries
+            # automatically once the token would have expired anyway.
+            await self._db.revoked_tokens.create_index("jti", unique=True)
+            await self._db.revoked_tokens.create_index("expires_at", expireAfterSeconds=0)
             
             logger.info("Database indexes created successfully")
             
@@ -155,6 +160,7 @@ _db_manager = MongoDBManager()
 COLLECTION_USERS = "users"
 COLLECTION_CHAT_SESSIONS = "chat_sessions"
 COLLECTION_PDF_METADATA = "pdf_metadata"
+COLLECTION_REVOKED_TOKENS = "revoked_tokens"
 
 # Note: Session management has been migrated to JWT tokens (stateless authentication)
 # The COLLECTION_SESSIONS and related functions have been removed
@@ -311,6 +317,29 @@ async def mark_chat_session_as_deleted(chat_session_id: str) -> None:
     """Soft delete a chat session (mark as deleted)"""
     await update_chat_session_field(chat_session_id, {"deleted": True})
     logger.info(f"Chat session marked as deleted: {chat_session_id}")
+
+
+# ============================================================================
+# TOKEN REVOCATION FUNCTIONS
+# ============================================================================
+
+@log_exceptions
+async def revoke_token(jti: str, expires_at: datetime) -> None:
+    """Mark a JWT (by its jti) as revoked until it expires."""
+    await _db_manager.db[COLLECTION_REVOKED_TOKENS].update_one(
+        {"jti": jti},
+        {"$set": {"jti": jti, "expires_at": expires_at, "revoked_at": datetime.utcnow()}},
+        upsert=True
+    )
+
+
+@log_exceptions
+async def is_token_revoked(jti: Optional[str]) -> bool:
+    """Return True if the given jti has been revoked."""
+    if not jti:
+        return False
+    doc = await _db_manager.db[COLLECTION_REVOKED_TOKENS].find_one({"jti": jti}, {"_id": 1})
+    return doc is not None
 
 
 # ============================================================================

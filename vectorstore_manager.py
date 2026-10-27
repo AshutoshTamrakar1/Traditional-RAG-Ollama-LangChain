@@ -48,11 +48,18 @@ class VectorStoreManager:
     def embeddings(self) -> HuggingFaceEmbeddings:
         """Lazy initialization of embeddings model."""
         if self._embeddings is None:
-            self._embeddings = HuggingFaceEmbeddings(
-                model_name=settings.EMBEDDING_MODEL_NAME,
-                model_kwargs={'device': 'cpu'},
-                encode_kwargs={'normalize_embeddings': True}
-            )
+            try:
+                self._embeddings = HuggingFaceEmbeddings(
+                    model_name=settings.EMBEDDING_MODEL_NAME,
+                    model_kwargs={'device': 'cpu', 'local_files_only': True},
+                    encode_kwargs={'normalize_embeddings': True}
+                )
+            except Exception:
+                self._embeddings = HuggingFaceEmbeddings(
+                    model_name=settings.EMBEDDING_MODEL_NAME,
+                    model_kwargs={'device': 'cpu'},
+                    encode_kwargs={'normalize_embeddings': True}
+                )
             logger.info(f"Embeddings model initialized: {settings.EMBEDDING_MODEL_NAME}")
         return self._embeddings
     

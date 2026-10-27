@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
+from pydantic import BaseModel
 from datetime import datetime
 
 from config import Settings, get_settings
@@ -11,7 +12,8 @@ from db_manager import (
     add_turn_to_general_chat,
     add_turn_to_multi_source_chat,
     add_question_to_source,
-    get_chat_session_by_id
+    get_chat_session_by_id,
+    rename_chat_session_title
 )
 from ai_engine import (
     chat_completion_LlamaModel_ws,
@@ -169,8 +171,9 @@ async def send_chat(
 
         logger.info(f"Chat turn saved with ID: {turn_id}")
         
-        # Generate title automatically if this is the first message (title is still "New Chat")
-        if chat_session_data.get("title") == "New Chat" and len(chat_session_data.get("messages", [])) == 0:
+        # Generate a title automatically on the first message (the upload step may already
+        # have set a placeholder title such as the PDF filename, so don't require "New Chat")
+        if len(chat_session_data.get("messages", [])) == 0:
             logger.info("First message detected, generating chat title...")
             try:
                 # Create messages for title generation
@@ -183,7 +186,6 @@ async def send_chat(
                 new_title = await generate_chat_title(messages_for_title)
                 
                 if new_title:
-                    from db_manager import rename_chat_session_title
                     await rename_chat_session_title(request.chat_session_id, new_title)
                     logger.info(f"Chat title updated to: {new_title}")
             except Exception as e:
@@ -209,3 +211,36 @@ async def list_available_models():
         "models": models,
         "default": "llama3"
     }
+
+
+class GenerateTitleRequest(BaseModel):
+    chat_session_id: str
+
+
+@router.post("/generate-title")
+@log_exceptions
+async def generate_title(
+    request: GenerateTitleRequest,
+    current_user: str = Depends(get_current_user)
+):
+    """Generate (and save) a title for a chat session from its first turns"""
+    chat_session_data = await get_chat_session_by_id(request.chat_session_id, current_user)
+    if not chat_session_data:
+        raise HTTPException(status_code=404, detail="Thread not found")
+
+    messages_for_title: List[Dict[str, str]] = []
+    for turn in (chat_session_data.get("messages") or [])[:3]:
+        if isinstance(turn, dict):
+            if turn.get("user_query"):
+                messages_for_title.append({"role": "user", "content": turn["user_query"]})
+            if turn.get("assistant_response"):
+                messages_for_title.append({"role": "assistant", "content": turn["assistant_response"]})
+    if not messages_for_title:
+        raise HTTPException(status_code=400, detail="Chat has no messages to generate a title from")
+
+    title = await generate_chat_title(messages_for_title)
+    if not title:
+        raise HTTPException(status_code=500, detail="Failed to generate title")
+
+    await rename_chat_session_title(request.chat_session_id, title)
+    return {"chat_session_id": request.chat_session_id, "title": title}
