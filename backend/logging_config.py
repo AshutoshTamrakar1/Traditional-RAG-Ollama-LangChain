@@ -25,8 +25,8 @@ def configure_logging(level: int = logging.INFO, log_file: Optional[str] = None)
     root.setLevel(level)
 
     # Remove any existing handlers to avoid duplicate logs
-    for h in list(root.handlers):
-        root.removeHandler(h)
+    while root.handlers:
+        root.removeHandler(root.handlers[0])
 
     # Console handler
     ch = logging.StreamHandler()
@@ -60,6 +60,18 @@ def get_logger(name: str):
     return logging.getLogger(name)
 
 
+def _handle_exception(exc: Exception, func: Any, custom_logger: Optional[logging.Logger] = None) -> None:
+    """Log caught exception with appropriate log level."""
+    log = custom_logger or logging.getLogger(func.__module__)
+    func_name = getattr(func, "__name__", str(func))
+    # Treat FastAPI HTTPExceptions as expected control-flow (e.g., auth failures)
+    # Log them at WARNING without full traceback to avoid noisy ERROR logs.
+    if isinstance(exc, FastAPIHTTPException):
+        log.warning("HTTPException in %s: %s", func_name, getattr(exc, "detail", str(exc)))
+    else:
+        log.exception("Unhandled exception in %s: %s", func_name, exc)
+
+
 def log_exceptions(_func=None, logger: Optional[logging.Logger] = None):
     """
     Decorator that logs unhandled exceptions. Usable as:
@@ -73,13 +85,7 @@ def log_exceptions(_func=None, logger: Optional[logging.Logger] = None):
             try:
                 return await func(*args, **kwargs)
             except Exception as e:
-                log = logger or logging.getLogger(func.__module__)
-                # Treat FastAPI HTTPExceptions as expected control-flow (e.g., auth failures)
-                # Log them at WARNING without full traceback to avoid noisy ERROR logs.
-                if isinstance(e, FastAPIHTTPException):
-                    log.warning("HTTPException in %s: %s", getattr(func, "__name__", str(func)), getattr(e, "detail", str(e)))
-                    raise
-                log.exception("Unhandled exception in %s: %s", getattr(func, "__name__", str(func)), e)
+                _handle_exception(e, func, logger)
                 raise
 
         @functools.wraps(func)
@@ -87,13 +93,7 @@ def log_exceptions(_func=None, logger: Optional[logging.Logger] = None):
             try:
                 return func(*args, **kwargs)
             except Exception as e:
-                log = logger or logging.getLogger(func.__module__)
-                # Treat FastAPI HTTPExceptions as expected control-flow (e.g., auth failures)
-                # Log them at WARNING without full traceback to avoid noisy ERROR logs.
-                if isinstance(e, FastAPIHTTPException):
-                    log.warning("HTTPException in %s: %s", getattr(func, "__name__", str(func)), getattr(e, "detail", str(e)))
-                    raise
-                log.exception("Unhandled exception in %s: %s", getattr(func, "__name__", str(func)), e)
+                _handle_exception(e, func, logger)
                 raise
 
         return _async_wrapper if asyncio.iscoroutinefunction(func) else _sync_wrapper

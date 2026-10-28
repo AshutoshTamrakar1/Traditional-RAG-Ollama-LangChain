@@ -41,11 +41,13 @@ RAG_SYSTEM_PROMPT: Final[str] = (
 # LANGCHAIN PROMPT TEMPLATES
 # ============================================================================
 
+INPUT_VARIABLE_TEMPLATE: Final[str] = "{input}"
+
 # General chat prompt template with system message and history
 CHAT_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
     SystemMessagePromptTemplate.from_template(SYSTEM_PROMPT),
     MessagesPlaceholder(variable_name="chat_history"),
-    HumanMessagePromptTemplate.from_template("{input}")
+    HumanMessagePromptTemplate.from_template(INPUT_VARIABLE_TEMPLATE)
 ])
 
 # RAG prompt template with system message, context, and history
@@ -56,7 +58,7 @@ RAG_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
         "Use the above context to answer the following question."
     ),
     MessagesPlaceholder(variable_name="chat_history", optional=True),
-    HumanMessagePromptTemplate.from_template("{input}")
+    HumanMessagePromptTemplate.from_template(INPUT_VARIABLE_TEMPLATE)
 ])
 
 # Multi-PDF RAG prompt template
@@ -67,27 +69,12 @@ MULTI_PDF_RAG_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
         "Use the above context to answer the following question."
     ),
     MessagesPlaceholder(variable_name="chat_history", optional=True),
-    HumanMessagePromptTemplate.from_template("{input}")
+    HumanMessagePromptTemplate.from_template(INPUT_VARIABLE_TEMPLATE)
 ])
 
 # ============================================================================
 # SPECIALIZED PROMPT TEMPLATES (Non-chat use cases)
 # ============================================================================
-
-# Mindmap generation prompt template (phi3 model)
-MINDMAP_PROMPT_TEMPLATE: Final[str] = (
-    "You are an expert at creating hierarchical mindmaps. Analyze the following document text "
-    "and create a comprehensive mindmap in Mermaid diagram syntax.\n\n"
-    "REQUIREMENTS:\n"
-    "1. Use ONLY Mermaid mindmap syntax - start with \"mindmap\" on first line\n"
-    "2. Use proper indentation with 2 spaces per level\n"
-    "3. Root node format: root((Title))\n"
-    "4. Create 3-5 main branches (key topics)\n"
-    "5. Each main branch should have 2-3 sub-branches\n"
-    "6. Keep labels concise (3-7 words max)\n"
-    "7. Output ONLY valid Mermaid code - no explanations, no markdown formatting\n\n"
-    "DOCUMENT TEXT:\n{pdf_text}\n\nGenerate ONLY the Mermaid mindmap code:" 
-)
 
 # Title generation prompt template
 TITLE_GENERATION_PROMPT_TEMPLATE = PromptTemplate.from_template(

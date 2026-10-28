@@ -1,9 +1,9 @@
 # Architecture Design Document
 
-## PDF RAG Chatbot v2.0 - Technical Architecture
+## PDF RAG Chatbot v2.1 - Technical Architecture
 
-**Version**: 2.0.0  
-**Last Updated**: February 2026  
+**Version**: 2.1.0  
+**Last Updated**: October 2026  
 **Status**: Production Ready
 
 ---
@@ -16,8 +16,10 @@
 4. [Data Models](#data-models)
 5. [API Design](#api-design)
 6. [Security Architecture](#security-architecture)
-7. [Scalability Considerations](#scalability-considerations)
-8. [Monitoring & Observability](#monitoring--observability)
+7. [Code Quality & SonarQube Standards](#code-quality--sonarqube-standards)
+8. [Scalability Considerations](#scalability-considerations)
+9. [Monitoring & Observability](#monitoring--observability)
+10. [Deployment Architecture](#deployment-architecture)
 
 ---
 
@@ -27,11 +29,13 @@
 A scalable, production-ready PDF chatbot system that enables users to upload PDF documents and have intelligent conversations using Retrieval-Augmented Generation (RAG) with local LLMs.
 
 ### Key Characteristics
-- **Architecture Style**: Layered Architecture with Service-Oriented Design
+- **Architecture Style**: Layered Architecture with clean Backend / Frontend separation
+- **Codebase Organization**: Dedicated `backend/` service directory and `reflex_app/` frontend directory
 - **Communication**: RESTful APIs with async/await patterns
 - **Data Persistence**: MongoDB (user/chat data) + ChromaDB (vector embeddings)
 - **AI Models**: Local Ollama LLMs (llama3, gemma, phi3)
-- **Authentication**: Stateless JWT tokens with access & refresh tokens
+- **Authentication**: Stateless JWT tokens with access & refresh tokens and revocation blacklisting
+- **Quality**: SonarLint / SonarQube clean code compliant (Cognitive Complexity <= 15)
 
 ---
 
@@ -41,22 +45,30 @@ A scalable, production-ready PDF chatbot system that enables users to upload PDF
 
 #### Components:
 - **Reflex Application** (`reflex_app/app/app.py`)
-  - Python-based reactive UI framework
-  - Real-time state management
-  - WebSocket ready for streaming
-  - Async state management with httpx
+  - Python-based reactive UI framework (Reflex 0.8+)
+  - Real-time client-state synchronization
+  - **Rich Markdown Rendering**: `rx.markdown` dynamically compiles AI responses to formatted HTML with support for headings (`##`, `###`), bold formatting, bullet and numbered lists, code blocks, blockquotes, and tables
+  - **Visual Message Separation**:
+    - **User Messages**: Right-aligned accent chat bubbles (`background_color="var(--blue-9)"`, crisp white typography, `border_radius="16px 16px 4px 16px"`, elevation drop-shadow) with solid user avatar (`U`)
+    - **AI Assistant Messages**: Left-aligned structured surface cards (`background_color="var(--gray-a2)"`, subtle border, `border_radius="4px 16px 16px 16px"`) paired with a violet AI avatar badge
+  - **Centered Reading Container**: `max_width="880px"` chat area for optimal reading line length on widescreen monitors
+  - **Consolidated Chat Header**: Chat title on the left; inline model selector dropdown and PDF upload trigger on the right
+  - **Form Submission**: Wrapped in `rx.form` supporting keyboard <kbd>Enter</kbd> to submit, animated loading spinner, and Lucide send icon
+  - **Multi-File Upload Modal**: Drag-and-drop file upload supporting up to 20 PDFs simultaneously
+  - **Session Context Continuity**: Switching between previous sessions in the sidebar queries MongoDB to re-synchronize active document IDs (`active_source_ids`) and conversation history
 
 #### Responsibilities:
-- User input collection
-- Response rendering
-- JWT token storage (localStorage/cookies)
-- File upload handling
+- User input collection and keyboard shortcut handling
+- Markdown and structured response rendering
+- JWT token storage (URL handover and state persistence)
+- Active session switching and PDF source toggling
+- Multi-file upload handling and progress tracking
 
 ---
 
 ### 2. API Gateway Layer
 
-#### Main Component: `pdfreader.py`
+#### Main Component: `backend/pdfreader.py`
 
 **Responsibilities:**
 - FastAPI application initialization
@@ -82,9 +94,9 @@ A scalable, production-ready PDF chatbot system that enables users to upload PDF
 
 ### 3. Service Layer
 
-Located in `services/` directory. Each service module handles a specific domain.
+Located in `backend/services/` directory. Each service module handles a specific domain.
 
-#### 3.1 PDF Service (`pdf_service.py`)
+#### 3.1 PDF Service (`backend/services/pdf_service.py`)
 
 **Endpoints:**
 - `POST /pdf/session` - Create new chat session
@@ -105,11 +117,11 @@ upload_pdf()
 **Dependencies:**
 - `db_manager`: Session persistence
 - `ai_engine`: PDF processing and embedding
-- `auth.active_sessions`: Session validation
+- `auth`: JWT token validation
 
 ---
 
-#### 3.2 Chat Service (`chat_service.py`)
+#### 3.2 Chat Service (`backend/services/chat_service.py`)
 
 **Endpoints:**
 - `POST /chat/send` - Send message (RAG query)
@@ -135,7 +147,7 @@ send_chat()
 
 ---
 
-#### 3.3 Mindmap Service (`mindmap_service.py`)
+#### 3.3 Mindmap Service (`backend/services/mindmap_service.py`)
 
 **Endpoints:**
 - `POST /mindmap/generate` - Generate mindmap from PDF
@@ -154,7 +166,7 @@ generate_mindmap()
 
 #### 3.4 Supporting Modules
 
-**`models.py`** - Pydantic Models
+**`backend/services/models.py`** - Pydantic Models
 ```python
 ChatRequest
 ChatResponse
@@ -163,7 +175,7 @@ MindmapResponse
 BaseRequest (with validation)
 ```
 
-**`exceptions.py`** - Custom Exceptions
+**`backend/services/exceptions.py`** - Custom Exceptions
 ```python
 PDFBotException (base)
   ↳ InvalidSessionError (403)
@@ -171,23 +183,21 @@ PDFBotException (base)
   ↳ SourceNotFoundError (404)
 ```
 
-**`utils.py`** - Utility Functions
+**`backend/services/utils.py`** - Utility Functions
 ```python
 verify_jwt_token()        # Validates JWT and extracts user_id
 get_user_from_token()     # Gets user from Authorization header
 ensure_upload_dir()
 RequestSimulator (for testing)
-# Deprecated:
-validate_session()        # Raises error directing to JWT
 ```
 
 ---
 
 ### 4. Business Logic Layer
 
-Core intelligence and orchestration modules.
+Core intelligence and orchestration modules located in `backend/`.
 
-#### 4.1 AI Engine (`ai_engine.py`)
+#### 4.1 AI Engine (`backend/ai_engine.py`)
 
 **Primary Functions:**
 
@@ -228,7 +238,7 @@ AVAILABLE_MODELS = {
 
 ---
 
-#### 4.2 Chains Module (`chains.py`)
+#### 4.2 Chains Module (`backend/chains.py`)
 
 **LangChain LCEL Chains** - Composable chain architecture
 
@@ -271,7 +281,7 @@ create_multi_pdf_rag_chain_with_history(model_name, session_id, collections)
 
 ---
 
-#### 4.3 Memory Manager (`memory_manager.py`)
+#### 4.3 Memory Manager (`backend/memory_manager.py`)
 
 **MongoDB-backed Conversation History**
 
@@ -301,7 +311,7 @@ get_windowed_messages(session_id, user_id, max_messages)
 
 ---
 
-#### 4.4 Vector Store Manager (`vectorstore_manager.py`)
+#### 4.4 Vector Store Manager (`backend/vectorstore_manager.py`)
 
 **ChromaDB Abstraction Layer**
 
@@ -332,11 +342,11 @@ class VectorStoreManager:
 **Embedding Model:**
 - `all-MiniLM-L6-v2` (384 dimensions)
 - Fast inference
-- Good semantic understanding
+- Offline caching (`local_files_only: True`)
 
 ---
 
-#### 4.5 Database Manager (`db_manager.py`)
+#### 4.5 Database Manager (`backend/db_manager.py`)
 
 **MongoDB Operations with Motor (async)**
 
@@ -348,14 +358,6 @@ get_user_by_email(email)
 update_user_last_login(user_id)
 ```
 
-**Session Management:**
-```python
-create_session(session_id, user_id)
-get_session(session_id)
-delete_session(session_id)
-cleanup_expired_sessions()  # Background task
-```
-
 **Chat Session Management:**
 ```python
 create_chat_session_in_db(user_id, session_id, chat_session_id)
@@ -363,20 +365,28 @@ add_source_to_chat_session(chat_session_id, source_id, filename, filepath)
 add_turn_to_general_chat(chat_session_id, question, answer)
 add_turn_to_multi_source_chat(chat_session_id, question, answer, source_ids)
 get_chat_session_by_id(chat_session_id)
-get_user_chat_session_list(user_id, session_id)
+get_user_chat_session_list(user_id)
+delete_chat_session(chat_session_id, user_id)
+```
+
+**Token Revocation & Blacklisting:**
+```python
+revoke_token(jti, token_type, expires_at)
+is_token_revoked(jti)
+cleanup_expired_tokens()
 ```
 
 **Collections:**
 - `users` - User accounts
-- `sessions` - Active sessions
-- `chat_sessions` - Thread metadata
-- `chat_history_{session_id}` - Per-session messages
+- `chat_sessions` - Session metadata, sources, and conversation turns
+- `revoked_tokens` - Blacklisted JWT JTIs with MongoDB TTL expiration
+- `chat_history_{session_id}` - Per-session raw message documents
 
 ---
 
-#### 4.6 Authentication (`auth.py`)
+#### 4.6 Authentication (`backend/auth.py`)
 
-**Session-Based Authentication (No JWT)**
+**Stateless JWT Authentication with Token Rotation**
 
 **Registration Flow:**
 ```python
@@ -384,8 +394,8 @@ register()
   → validate_email()
   → hash_password(bcrypt)
   → db_manager.create_user()
-  → create_session()
-  → return session_id
+  → generate access_token + refresh_token
+  → return tokens
 ```
 
 **Login Flow:**
@@ -393,29 +403,30 @@ register()
 login()
   → db_manager.get_user_by_email()
   → bcrypt.checkpw()
-  → db_manager.create_session()
-  → active_sessions[session_id] = {user_id, timestamp}
-  → return session_id
+  → db_manager.update_user_last_login()
+  → generate access_token + refresh_token
+  → return tokens
 ```
 
-**Session Validation:**
+**Token Refresh Flow:**
 ```python
-validate_session()
-  → Check active_sessions (in-memory)
-  → Fallback: db_manager.get_session()
-  → Verify expiry
-  → return user_id
+refresh()
+  → verify refresh_token
+  → check db_manager.is_token_revoked(jti)
+  → db_manager.revoke_token(jti) [Refresh token rotation]
+  → generate new access_token + new refresh_token
+  → return tokens
 ```
 
 **Security Measures:**
-- Bcrypt password hashing (cost factor: 12)
-- Session expiry (24 hours default)
-- Email validation with Pydantic
-- Password complexity requirements
+- Bcrypt password hashing (salt rounds: 12)
+- Short-lived Access Tokens (60 min) + Long-lived Refresh Tokens (7 days)
+- Refresh token rotation (single-use refresh tokens)
+- Immediate token blacklisting on logout via JTI tracking
 
 ---
 
-#### 4.7 Prompts (`prompts.py`)
+#### 4.7 Prompts (`backend/prompts.py`)
 
 **Centralized Prompt Templates using LangChain**
 
@@ -440,7 +451,7 @@ TITLE_GENERATION_PROMPT = PromptTemplate(...)
 
 ---
 
-#### 4.8 Callbacks (`callbacks.py`)
+#### 4.8 Callbacks (`backend/callbacks.py`)
 
 **Observability & Monitoring Handlers**
 
@@ -459,14 +470,11 @@ class PerformanceCallbackHandler(BaseCallbackHandler):
     on_llm_start() → Start timer
     on_llm_end() → Calculate duration, tokens/sec
     on_chain_start/end() → Track chain performance
-
-create_callback_manager(handlers_list)
-  → Returns CallbackManager for LangChain
 ```
 
 ---
 
-#### 4.9 Output Parsers (`output_parsers.py`)
+#### 4.9 Output Parsers (`backend/output_parsers.py`)
 
 **Structured Output Parsing**
 
@@ -479,13 +487,11 @@ class MindmapOutputParser(BaseOutputParser[MindmapOutput]):
     
 class SafeJsonOutputParser(BaseOutputParser[Any]):
     parse() → Fault-tolerant JSON extraction
-    
-extract_json_from_text() → Regex-based JSON extraction
 ```
 
 ---
 
-#### 4.10 Configuration (`config.py`)
+#### 4.10 Configuration (`backend/config.py`)
 
 **Pydantic Settings Management**
 
@@ -507,6 +513,12 @@ class Settings(BaseSettings):
     CHROMA_PERSIST_DIR: str
     EMBEDDING_MODEL_NAME: str
     
+    # Security
+    JWT_SECRET_KEY: str
+    JWT_ALGORITHM: str
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int
+    
     # Logging
     LOG_LEVEL: str
     LOG_TO_FILE: bool
@@ -515,9 +527,6 @@ class Settings(BaseSettings):
         env_file=".env",
         case_sensitive=True
     )
-
-@lru_cache()
-def get_settings() → Settings (singleton)
 ```
 
 ---
@@ -537,24 +546,12 @@ def get_settings() → Settings (singleton)
 }
 ```
 
-### Session Model
-```python
-{
-    "_id": ObjectId,
-    "session_id": str (UUID),
-    "user_id": str,
-    "created_at": datetime,
-    "expires_at": datetime
-}
-```
-
 ### Chat Session Model
 ```python
 {
     "_id": ObjectId,
     "chat_session_id": str (UUID),
     "user_id": str,
-    "session_id": str,
     "title": str,
     "created_at": datetime,
     "updated_at": datetime,
@@ -580,6 +577,17 @@ def get_settings() → Settings (singleton)
 }
 ```
 
+### Revoked Token Model
+```python
+{
+    "_id": ObjectId,
+    "jti": str (JWT ID),
+    "token_type": str ("access" | "refresh"),
+    "revoked_at": datetime,
+    "expires_at": datetime (Indexed with TTL for auto-cleanup)
+}
+```
+
 ### Vector Store Document
 ```python
 {
@@ -602,14 +610,15 @@ def get_settings() → Settings (singleton)
 - Resource-based URLs
 - Standard HTTP methods (GET, POST, DELETE)
 - JSON request/response bodies
-- Proper status codes
+- Proper HTTP status codes with RFC error details
 
 ### Authentication Flow
 ```
-1. POST /auth/register → {session_id, user_id}
-2. POST /auth/login → {session_id, user_id}
-3. Include session_id in all subsequent requests
-4. POST /auth/logout → Clear session
+1. POST /auth/register → {access_token, refresh_token, user_id}
+2. POST /auth/login → {access_token, refresh_token, user_id}
+3. Include Authorization: Bearer <access_token> in subsequent requests
+4. POST /auth/refresh → {access_token, refresh_token} (Rotates refresh token)
+5. POST /auth/logout → Blacklists token JTI in MongoDB
 ```
 
 ### PDF RAG Flow
@@ -620,14 +629,6 @@ def get_settings() → Settings (singleton)
 4. POST /mindmap/generate → {mindmap_data}
 ```
 
-### Error Responses
-```json
-{
-    "detail": "Error message",
-    "status_code": 400/403/404/500
-}
-```
-
 ---
 
 ## Security Architecture
@@ -635,159 +636,101 @@ def get_settings() → Settings (singleton)
 ### Authentication
 - **JWT-based**: Stateless token authentication
 - **Token Types**:
-  - **Access Token**: Short-lived (60 minutes default), used for API authentication
-  - **Refresh Token**: Long-lived (7 days default), used to obtain new access tokens
-- **Password Hashing**: Bcrypt with salt (unchanged)
+  - **Access Token**: Short-lived (60 minutes default), used for API requests
+  - **Refresh Token**: Long-lived (7 days default), rotated on each refresh
+- **Password Hashing**: Bcrypt with salt (12 rounds)
 - **Token Algorithm**: HS256 (HMAC with SHA-256)
-- **Secret Key**: 256-bit randomly generated (configurable via env var)
+- **Revocation**: Instant token blacklisting with MongoDB TTL index
 
 ### Authorization
-- User-scoped resources (chat sessions, uploads)
-- JWT validation on every protected endpoint
-- Dependency injection pattern using `Depends(get_current_user)`
-- No server-side session storage (stateless)
+- User-scoped resources (chat sessions, uploads, vector collections)
+- JWT validation on every protected endpoint via `Annotated[str, Depends(get_current_user)]`
+- No cross-tenant document or history leakage
 
-### Token Flow
-```
-1. Login/Register → Returns access_token + refresh_token
-2. Client stores tokens (localStorage or httpOnly cookies)
-3. API requests include: Authorization: Bearer <access_token>
-4. Server validates JWT signature and expiry
-5. On access_token expiry → Use refresh_token to get new access_token
-6. Logout → Client discards tokens (server-side logout optional)
-```
+---
 
-### Data Security
-- Passwords never stored in plaintext
-- JWT tokens signed with secret key (prevents tampering)
-- File uploads validated (PDF only)
-- MongoDB connections over authenticated channels
-- Environment variables for secrets
-- No session data stored server-side (horizontal scaling friendly)
+## Code Quality & SonarQube Standards
+
+### 1. Cognitive Complexity Compliance
+- All service methods, AI orchestration routines, and Reflex event handlers maintain **Cognitive Complexity <= 15** (strictly adhering to SonarLint rule `python:S3776`).
+- Complex loops and nested conditionals were decomposed into single-responsibility private helper functions.
+
+### 2. Modern Dependency Injection & Type Annotations
+- FastAPI dependency injection leverages `typing.Annotated` (`python:S8410`), separating dependency definitions from type annotations.
+- Redundant `response_model` annotations matching return signatures have been eliminated (`python:S8409`).
+
+### 3. Timezone-Aware Datetime Operations
+- Replaced deprecated naive `datetime.utcnow()` with timezone-aware `datetime.now(timezone.utc)` across auth and database layers (`python:S6903`).
+
+### 4. Literal De-duplication
+- Repeated string literals (such as session IDs, status strings, error messages, and file paths) have been extracted into uppercase constants (`python:S1192`).
+
+### 5. Exception Logging
+- Generic logging calls in exception blocks were updated to `logger.exception()` / `logging.exception()` to preserve full stack traces for automated log collectors (`python:S8572`).
 
 ---
 
 ## Scalability Considerations
 
-### Current Limitations
-- Single-server deployment
-- Local Ollama models (not load-balanced)
-- File storage on disk (not object storage)
-- No distributed caching layer
+### Horizontal Scaling
+- Stateless JWT authentication allows deploying multiple FastAPI replicas behind a load balancer without sticky sessions.
+- MongoDB and ChromaDB operate as decoupled storage backends.
 
-### Scaling Strategies
-1. **Horizontal Scaling**:
-   - Deploy multiple FastAPI instances (stateless JWT enables this)
-   - Load balancer (Nginx/HAProxy)
-   - No shared session state required (JWT FTW!)
-
-2. **Database Scaling**:
-   - MongoDB replica sets
-   - Read replicas for queries
-   - Sharding by user_id
-
-3. **Vector Store Scaling**:
-   - Distributed ChromaDB clusters
-   - Or migrate to Pinecone/Weaviate
-
-4. **LLM Scaling**:
-   - Ollama cluster with load balancing
-   - Or migrate to cloud LLM APIs
+### Database Scaling
+- MongoDB replica sets for high availability and read-replica distribution.
+- Vector collections are isolated per document source ID (`source_id`), preventing cross-document retrieval interference.
 
 ---
 
 ## Monitoring & Observability
 
 ### Logging
-- **Structured logging** with `logging_config.py`
-- **Log levels**: DEBUG, INFO, WARNING, ERROR
-- **File rotation**: Daily rotation with 7-day retention
-- **Console output**: Rich formatting
+- **Structured logging** via `backend/logging_config.py`.
+- **Log levels**: DEBUG, INFO, WARNING, ERROR.
+- **File rotation**: Daily rotation with 7-day retention.
 
-### Callbacks
-- **Performance tracking**: Token speed, latency
-- **Error tracking**: LLM failures, chain errors
-- **Debug mode**: Detailed chain execution logs
-
-### Metrics (Future)
-- Request rate (requests/sec)
-- Response time (p50, p95, p99)
-- Error rate
-- Active sessions
-- Vector store size
+### Performance Callbacks
+- LangChain callback managers track token streaming latency, generation speed, and LLM invocation metrics.
 
 ---
 
 ## Deployment Architecture
 
-### Development
+### Directory Layout
 ```
-Local Machine
-├── Python FastAPI Server (port 8000)
-├── Reflex Frontend (port 3000)
-├── MongoDB (port 27017)
-├── Ollama (port 11434)
-└── ChromaDB (embedded)
+pdf-rag-chatbot-v1/
+├── backend/                   # FastAPI Backend Services
+│   ├── services/              # Domain service routers
+│   ├── ai_engine.py           # Core AI & RAG execution
+│   ├── auth.py                # JWT auth & bcrypt hashing
+│   ├── chains.py              # LCEL chains
+│   ├── config.py              # Pydantic configuration
+│   ├── db_manager.py          # MongoDB persistence
+│   ├── logging_config.py      # Structured logging
+│   ├── memory_manager.py      # Chat history memory
+│   ├── output_parsers.py      # Output parsing
+│   ├── pdfreader.py           # FastAPI entrypoint
+│   ├── prompts.py             # Prompt templates
+│   ├── requirements.txt       # Backend dependencies
+│   └── vectorstore_manager.py # ChromaDB manager
+│
+├── reflex_app/                # Reflex Frontend Web App
+│   ├── app/
+│   │   └── app.py             # Reflex reactive UI & state
+│   └── rxconfig.py            # Reflex configuration
+│
+├── tests/                     # Automated tests
+├── ARCHITECTURE.md            # Technical Architecture
+└── README.md                  # Project Documentation
 ```
 
-### Production (Recommended)
+### Local Services
 ```
-Load Balancer
-├── FastAPI Instance 1
-├── FastAPI Instance 2
-└── FastAPI Instance N
-     ↓
-Redis (Session Cache)
-MongoDB Replica Set
-ChromaDB Cluster
-Ollama Cluster / Cloud LLM API
+Local Environment:
+├── FastAPI Server        (http://localhost:8000)
+├── Reflex Web Frontend   (http://localhost:3000)
+├── Reflex Backend Server (http://localhost:8001)
+├── MongoDB               (mongodb://localhost:27017)
+├── Ollama LLM Service    (http://localhost:11434)
+└── ChromaDB              (Embedded at backend/chroma_db)
 ```
-
----
-
-## Technology Decisions
-
-### Why FastAPI?
-- Async/await native support
-- Auto-generated OpenAPI docs
-- Pydantic integration
-- High performance
-
-### Why MongoDB?
-- Flexible document schema
-- Good for chat history
-- Async driver (Motor)
-- Easy horizontal scaling
-
-### Why ChromaDB?
-- Open-source vector database
-- Persistent storage
-- Good performance for medium-scale
-- Python-native API
-
-### Why Local LLMs (Ollama)?
-- Data privacy
-- No API costs
-- Low latency (local inference)
-- Model flexibility
-
-### Why LangChain?
-- Standardized LLM interfaces
-- LCEL composability
-- Rich ecosystem
-- Memory management
-
----
-
-## Conclusion
-
-This architecture provides:
-- ✅ **Modularity**: Clear separation of concerns
-- ✅ **Scalability**: Ready for horizontal scaling
-- ✅ **Maintainability**: Well-organized codebase
-- ✅ **Observability**: Comprehensive logging and callbacks
-- ✅ **Security**: Session-based auth with bcrypt
-- ✅ **Performance**: Async/await throughout
-- ✅ **Extensibility**: Easy to add new features
-
-The layered architecture ensures that each component has a single responsibility and can be modified or replaced independently.

@@ -1,5 +1,6 @@
 import logging
 import os
+from pathlib import Path
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import validator, Field
@@ -35,7 +36,7 @@ class Settings(BaseSettings):
     # SERVER SETTINGS
     # ========================================================================
     
-    HOST: str = Field(default="0.0.0.0", env="HOST")
+    HOST: str = Field(default="127.0.0.1", env="HOST")
     PORT: int = Field(default=8000, env="PORT")
     WORKERS: int = Field(default=1, env="WORKERS")
     RELOAD: bool = Field(default=True, env="RELOAD")
@@ -183,10 +184,6 @@ class Settings(BaseSettings):
         default=300,
         env="PDF_PROCESSING_TIMEOUT_SECONDS"
     )
-    MINDMAP_GENERATION_TIMEOUT_SECONDS: int = Field(
-        default=300,
-        env="MINDMAP_GENERATION_TIMEOUT_SECONDS"
-    )
     
     # ========================================================================
     # VALIDATORS
@@ -214,6 +211,28 @@ class Settings(BaseSettings):
         if v <= 0:
             raise ValueError("MAX_UPLOAD_SIZE_MB must be greater than 0")
         return v
+
+    @validator("UPLOAD_DIR", pre=True)
+    def validate_upload_dir(cls, v):
+        """Ensure UPLOAD_DIR is anchored to project root when relative"""
+        if not v:
+            v = "./uploads"
+        p = Path(v)
+        if not p.is_absolute():
+            repo_path = (Path(__file__).resolve().parent.parent / p).resolve()
+            return str(repo_path)
+        return str(p.resolve())
+
+    @validator("CHROMA_PERSIST_DIR", pre=True)
+    def validate_chroma_dir(cls, v):
+        """Ensure CHROMA_PERSIST_DIR is anchored to project root when relative"""
+        if not v:
+            v = "./chroma_db"
+        p = Path(v)
+        if not p.is_absolute():
+            repo_path = (Path(__file__).resolve().parent.parent / p).resolve()
+            return str(repo_path)
+        return str(p.resolve())
     
     @validator("CORS_ORIGINS", pre=True)
     def validate_cors_origins(cls, v):
@@ -241,7 +260,7 @@ class Settings(BaseSettings):
         return v
     
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=(os.path.join(os.path.dirname(__file__), ".env"), ".env"),
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore"  # Ignore extra fields from .env
@@ -367,7 +386,7 @@ def initialize_config():
         return settings
     
     except Exception as e:
-        logger.error(f"Configuration initialization failed: {e}")
+        logger.exception(f"Configuration initialization failed: {e}")
         raise
 
 

@@ -1,6 +1,6 @@
 import os
-from datetime import datetime
-from typing import Dict, List, Optional, Any
+from datetime import datetime, timezone
+from typing import Dict, List, Optional, Any, Final
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING
 from pymongo.errors import ConnectionFailure, ServerSelectionTimeoutError
@@ -11,6 +11,16 @@ from dotenv import load_dotenv
 load_dotenv()
 
 logger = get_logger(__name__)
+
+# Constants
+OP_PUSH: Final[str] = "$push"
+FIELD_SOURCES_SOURCE_ID: Final[str] = "sources.source_id"
+
+
+def _utc_now_iso() -> str:
+    """Return current UTC timestamp in ISO 8601 format."""
+    return datetime.now(timezone.utc).isoformat()
+
 
 # ============================================================================
 # MONGODB CONNECTION & CONFIGURATION
@@ -131,8 +141,8 @@ class MongoDBManager:
             raise RuntimeError("Database not initialized. Call __init__ first.")
         return self._db
 
-    async def close(self):
-        """Close MongoDB connection (async)"""
+    def close(self):
+        """Close MongoDB connection"""
         if self._client:
             self._client.close()
             logger.info("MongoDB connection closed")
@@ -152,7 +162,7 @@ COLLECTION_REVOKED_TOKENS = "revoked_tokens"
 @log_exceptions
 async def add_pdf_metadata(metadata: Dict[str, Any]) -> None:
     """Add PDF metadata to collection"""
-    metadata.setdefault("created_at", datetime.utcnow().isoformat())
+    metadata.setdefault("created_at", _utc_now_iso())
     await _db_manager.db[COLLECTION_PDF_METADATA].insert_one(metadata)
     logger.info(f"PDF metadata added: {metadata.get('pdf_id')}")
 
@@ -173,13 +183,13 @@ async def create_user(user_id: str, email: str = None, username: str = None) -> 
         "user_id": user_id,
         "email": email,
         "username": username,
-        "created_at": datetime.utcnow().isoformat(),
-        "updated_at": datetime.utcnow().isoformat(),
+        "created_at": _utc_now_iso(),
+        "updated_at": _utc_now_iso(),
         "last_login": None,
         "active": True
     }
     
-    result = await _db_manager.db[COLLECTION_USERS].insert_one(user_doc)
+    await _db_manager.db[COLLECTION_USERS].insert_one(user_doc)
     logger.info(f"User created: {user_id}")
     return user_doc
 
@@ -196,7 +206,7 @@ async def update_user_last_login(user_id: str) -> None:
     """Update user's last login timestamp"""
     await _db_manager.db[COLLECTION_USERS].update_one(
         {"user_id": user_id},
-        {"$set": {"last_login": datetime.utcnow().isoformat()}}
+        {"$set": {"last_login": _utc_now_iso()}}
     )
     logger.info(f"Updated last login for user: {user_id}")
 
@@ -206,7 +216,7 @@ async def delete_user(user_id: str) -> None:
     """Soft delete user (mark as inactive)"""
     await _db_manager.db[COLLECTION_USERS].update_one(
         {"user_id": user_id},
-        {"$set": {"active": False, "updated_at": datetime.utcnow().isoformat()}}
+        {"$set": {"active": False, "updated_at": _utc_now_iso()}}
     )
     logger.info(f"User marked as inactive: {user_id}")
 
@@ -226,8 +236,8 @@ async def create_chat_session_in_db(chat_session: Dict[str, Any]) -> None:
     
     # Set default values
     chat_session.setdefault("title", "New Chat")
-    chat_session.setdefault("created_at", datetime.utcnow().isoformat())
-    chat_session.setdefault("updated_at", datetime.utcnow().isoformat())
+    chat_session.setdefault("created_at", _utc_now_iso())
+    chat_session.setdefault("updated_at", _utc_now_iso())
     chat_session.setdefault("messages", [])
     chat_session.setdefault("sources", [])
     chat_session.setdefault("deleted", False)
@@ -275,7 +285,7 @@ async def get_user_chat_session_list(user_id: str, limit: int = 50) -> List[Dict
 @log_exceptions
 async def update_chat_session_field(chat_session_id: str, update_dict: Dict[str, Any]) -> None:
     """Update specific fields in a chat session"""
-    update_dict["updated_at"] = datetime.utcnow().isoformat()
+    update_dict["updated_at"] = _utc_now_iso()
     
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
         {"chat_session_id": chat_session_id, "deleted": False},
@@ -311,7 +321,7 @@ async def revoke_token(jti: str, expires_at: datetime) -> None:
     """Mark a JWT (by its jti) as revoked until it expires."""
     await _db_manager.db[COLLECTION_REVOKED_TOKENS].update_one(
         {"jti": jti},
-        {"$set": {"jti": jti, "expires_at": expires_at, "revoked_at": datetime.utcnow()}},
+        {"$set": {"jti": jti, "expires_at": expires_at, "revoked_at": datetime.now(timezone.utc)}},
         upsert=True
     )
 
@@ -335,15 +345,14 @@ async def add_source_to_chat_session(chat_session_id: str, source: Dict[str, Any
     if "source_id" not in source:
         raise ValueError("source must have 'source_id' field")
     
-    source.setdefault("uploaded_at", datetime.utcnow().isoformat())
+    source.setdefault("uploaded_at", _utc_now_iso())
     source.setdefault("related_questions", [])
-    source.setdefault("mindmap", {"path": None, "chat_messages": []})
     
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
         {"chat_session_id": chat_session_id, "deleted": False},
         {
-            "$push": {"sources": source},
-            "$set": {"updated_at": datetime.utcnow().isoformat()}
+            OP_PUSH: {"sources": source},
+            "$set": {"updated_at": _utc_now_iso()}
         }
     )
     if result.matched_count == 0:
@@ -359,10 +368,10 @@ async def update_source_field(chat_session_id: str, source_id: str, update_dict:
     for key, value in update_dict.items():
         query_dict[f"sources.$.{key}"] = value
     
-    query_dict["updated_at"] = datetime.utcnow().isoformat()
+    query_dict["updated_at"] = _utc_now_iso()
     
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
-        {"chat_session_id": chat_session_id, "sources.source_id": source_id, "deleted": False},
+        {"chat_session_id": chat_session_id, FIELD_SOURCES_SOURCE_ID: source_id, "deleted": False},
         {"$set": query_dict}
     )
     
@@ -376,7 +385,7 @@ async def update_source_field(chat_session_id: str, source_id: str, update_dict:
 async def get_source_by_id(chat_session_id: str, source_id: str) -> Optional[Dict[str, Any]]:
     """Get a specific source from a chat session"""
     session = await _db_manager.db[COLLECTION_CHAT_SESSIONS].find_one(
-        {"chat_session_id": chat_session_id, "sources.source_id": source_id, "deleted": False},
+        {"chat_session_id": chat_session_id, FIELD_SOURCES_SOURCE_ID: source_id, "deleted": False},
         {"sources.$": 1}
     )
     
@@ -392,7 +401,7 @@ async def add_filename_to_uploaded_list(chat_session_id: str, filename: str) -> 
         {"chat_session_id": chat_session_id, "deleted": False},
         {
             "$addToSet": {"uploaded_files": filename},
-            "$set": {"updated_at": datetime.utcnow().isoformat()}
+            "$set": {"updated_at": _utc_now_iso()}
         }
     )
     if result.matched_count == 0:
@@ -411,13 +420,13 @@ async def add_turn_to_general_chat(chat_session_id: str, turn: Dict[str, Any]) -
     if "id" not in turn:
         raise ValueError("turn must have 'id' field")
     
-    turn.setdefault("timestamp", datetime.utcnow().isoformat())
+    turn.setdefault("timestamp", _utc_now_iso())
     
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
         {"chat_session_id": chat_session_id, "deleted": False},
         {
-            "$push": {"messages": turn},
-            "$set": {"updated_at": datetime.utcnow().isoformat()}
+            OP_PUSH: {"messages": turn},
+            "$set": {"updated_at": _utc_now_iso()}
         }
     )
     if result.matched_count == 0:
@@ -436,14 +445,14 @@ async def add_turn_to_multi_source_chat(
     if "id" not in turn:
         raise ValueError("turn must have 'id' field")
     
-    turn.setdefault("timestamp", datetime.utcnow().isoformat())
+    turn.setdefault("timestamp", _utc_now_iso())
     turn["source_ids"] = source_ids
     
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
         {"chat_session_id": chat_session_id, "deleted": False},
         {
-            "$push": {"messages": turn},
-            "$set": {"updated_at": datetime.utcnow().isoformat()}
+            OP_PUSH: {"messages": turn},
+            "$set": {"updated_at": _utc_now_iso()}
         }
     )
     if result.matched_count == 0:
@@ -462,23 +471,23 @@ async def add_question_to_source(
     if "id" not in question_turn:
         raise ValueError("question_turn must have 'id' field")
     
-    question_turn.setdefault("timestamp", datetime.utcnow().isoformat())
+    question_turn.setdefault("timestamp", _utc_now_iso())
     
     # Add to general messages
     result1 = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
         {"chat_session_id": chat_session_id, "deleted": False},
         {
-            "$push": {"messages": question_turn},
-            "$set": {"updated_at": datetime.utcnow().isoformat()}
+            OP_PUSH: {"messages": question_turn},
+            "$set": {"updated_at": _utc_now_iso()}
         }
     )
     
     # Also add to source's related questions
     result2 = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
-        {"chat_session_id": chat_session_id, "sources.source_id": source_id, "deleted": False},
+        {"chat_session_id": chat_session_id, FIELD_SOURCES_SOURCE_ID: source_id, "deleted": False},
         {
-            "$push": {"sources.$.related_questions": question_turn},
-            "$set": {"updated_at": datetime.utcnow().isoformat()}
+            OP_PUSH: {"sources.$.related_questions": question_turn},
+            "$set": {"updated_at": _utc_now_iso()}
         }
     )
     if (result1.matched_count == 0) and (result2.matched_count == 0):
@@ -509,7 +518,7 @@ async def add_feedback_to_turn(
     """Add user feedback to a chat turn"""
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
         {"chat_session_id": chat_session_id, "messages.id": turn_id, "deleted": False},
-        {"$set": {"messages.$.feedback": feedback, "updated_at": datetime.utcnow().isoformat()}}
+        {"$set": {"messages.$.feedback": feedback, "updated_at": _utc_now_iso()}}
     )
     if result.matched_count == 0:
         logger.warning(f"Turn not found while adding feedback: {turn_id}")
@@ -551,11 +560,11 @@ async def cleanup_old_sessions(days: int = 30) -> int:
     """Delete sessions older than specified days (soft delete)"""
     from datetime import timedelta
     
-    cutoff_date = (datetime.utcnow() - timedelta(days=days)).isoformat()
+    cutoff_date = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_many(
         {"created_at": {"$lt": cutoff_date}, "deleted": False},
-        {"$set": {"deleted": True, "updated_at": datetime.utcnow().isoformat()}}
+        {"$set": {"deleted": True, "updated_at": _utc_now_iso()}}
     )
     
     logger.info(f"Cleaned up {result.modified_count} old sessions (older than {days} days)")

@@ -4,7 +4,7 @@ from fastapi.responses import JSONResponse
 from fastapi import HTTPException
 from pathlib import Path
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 
 from config import Settings, get_settings
 from .exceptions import ThreadNotFoundError
@@ -25,7 +25,56 @@ from logging_config import get_logger, log_exceptions
 logger = get_logger(__name__)
 router = APIRouter(tags=["PDF Operations"])
 
-@router.post("/session")
+DEFAULT_CHAT_TITLE = "New Chat"
+
+
+def _format_chat_messages(raw_messages: list) -> list[dict]:
+    """Format stored chat messages into standard role/content dicts."""
+    formatted = []
+    for msg in raw_messages:
+        if not isinstance(msg, dict):
+            continue
+        if "role" in msg and "content" in msg:
+            formatted.append({
+                "role": msg["role"],
+                "content": msg["content"]
+            })
+        else:
+            if msg.get("user_query"):
+                formatted.append({
+                    "role": "user",
+                    "content": msg["user_query"]
+                })
+            if msg.get("assistant_response"):
+                formatted.append({
+                    "role": "assistant",
+                    "content": msg["assistant_response"]
+                })
+    return formatted
+
+
+def _format_sources(raw_sources: list) -> list[dict]:
+    """Format stored sources into clean source dicts (supporting both source_id and legacy id)."""
+    formatted = []
+    for s in raw_sources:
+        if not isinstance(s, dict):
+            continue
+        sid = s.get("source_id") or s.get("id") or ""
+        if sid:
+            formatted.append({
+                "source_id": sid,
+                "filename": s.get("filename", "Unknown PDF"),
+                "filepath": s.get("filepath", ""),
+            })
+    return formatted
+
+
+@router.post(
+    "/session",
+    responses={
+        500: {"description": "Failed to create chat session"}
+    }
+)
 @log_exceptions
 async def create_chat_session(
     current_user: str = Depends(get_current_user),
@@ -41,8 +90,8 @@ async def create_chat_session(
         new_chat_session = {
             "chat_session_id": chat_session_id,
             "user_id": user_id,
-            "title": "New Chat",
-            "created_at": datetime.utcnow().isoformat(),
+            "title": DEFAULT_CHAT_TITLE,
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "messages": [],
             "sources": []
         }
@@ -54,13 +103,20 @@ async def create_chat_session(
             status_code=200,
             content={
                 "chat_session_id": chat_session_id,
-                "title": "New Chat"
+                "title": DEFAULT_CHAT_TITLE
             }
         )
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to create chat session")
 
-@router.get("/session/{chat_session_id}")
+
+@router.get(
+    "/session/{chat_session_id}",
+    responses={
+        404: {"description": "Chat session not found"},
+        500: {"description": "Failed to fetch chat session"}
+    }
+)
 @log_exceptions
 async def get_chat_session(
     chat_session_id: str,
@@ -77,14 +133,22 @@ async def get_chat_session(
         if not chat_session_data:
             raise ThreadNotFoundError()
         
+        raw_messages = chat_session_data.get("messages", []) or []
+        formatted_messages = _format_chat_messages(raw_messages)
+        
+        raw_sources = chat_session_data.get("sources", []) or []
+        sources = _format_sources(raw_sources)
+
         return JSONResponse(
             status_code=200,
             content={
                 "chat_session_id": chat_session_id,
-                "title": chat_session_data.get("title", "New Chat"),
+                "title": chat_session_data.get("title", DEFAULT_CHAT_TITLE),
                 "created_at": chat_session_data.get("created_at"),
-                "message_count": len(chat_session_data.get("messages", [])),
-                "source_count": len(chat_session_data.get("sources", []))
+                "message_count": len(raw_messages),
+                "source_count": len(sources),
+                "messages": formatted_messages,
+                "sources": sources,
             }
         )
     except ThreadNotFoundError:
@@ -92,6 +156,7 @@ async def get_chat_session(
     except Exception as e:
         logger.error(f"Error fetching chat session: {e}")
         raise HTTPException(status_code=500, detail="Failed to fetch chat session")
+
 
 @router.get("/sessions")
 @log_exceptions
@@ -106,7 +171,7 @@ async def list_chat_sessions(
             "sessions": [
                 {
                     "chat_session_id": s.get("chat_session_id"),
-                    "title": s.get("title", "New Chat"),
+                    "title": s.get("title", DEFAULT_CHAT_TITLE),
                     "created_at": s.get("created_at"),
                     "updated_at": s.get("updated_at"),
                 }
@@ -115,7 +180,13 @@ async def list_chat_sessions(
         }
     )
 
-@router.delete("/session/{chat_session_id}")
+
+@router.delete(
+    "/session/{chat_session_id}",
+    responses={
+        404: {"description": "Chat session not found"}
+    }
+)
 @log_exceptions
 async def delete_chat_session(
     chat_session_id: str,
@@ -153,7 +224,15 @@ async def delete_chat_session(
         content={"status": "success", "chat_session_id": chat_session_id}
     )
 
-@router.post("/upload")
+
+@router.post(
+    "/upload",
+    responses={
+        400: {"description": "Invalid file format or content"},
+        404: {"description": "Chat session not found"},
+        500: {"description": "Upload failed"}
+    }
+)
 @log_exceptions
 async def upload_pdf(
     file: UploadFile = File(...),
@@ -199,9 +278,8 @@ async def upload_pdf(
         new_source = {
             "source_id": source_id,
             "filename": original_name,
-            "filepath": str(file_path),
+            "filepath": str(file_path.resolve()),
             "related_questions": [],
-            "mindmap": {"path": None, "chat_messages": []},
         }
 
         # DB writes — use async db_manager functions
@@ -210,7 +288,7 @@ async def upload_pdf(
 
         # Update chat session title if needed
         new_title = None
-        if not chat_session_data.get('sources') and chat_session_data.get('title') == "New Chat":
+        if not chat_session_data.get('sources') and chat_session_data.get('title') == DEFAULT_CHAT_TITLE:
             new_title = original_name
             await update_chat_session_field(chat_session_id, {'title': new_title})
             logger.info(f"Updated chat session title to: {new_title}")

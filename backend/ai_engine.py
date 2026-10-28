@@ -11,7 +11,6 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from prompts import (
     SYSTEM_PROMPT,
     RAG_SYSTEM_PROMPT,
-    MINDMAP_PROMPT_TEMPLATE,
     TITLE_GENERATION_PROMPT,
     HISTORY_LENGTH,
 )
@@ -23,11 +22,10 @@ from chains import (
     create_multi_pdf_rag_chain_with_history,
 )
 from config import get_settings
+from services.utils import resolve_pdf_path
 from output_parsers import (
     TitleOutputParser,
-    MindmapOutputParser,
     ChatTitle,
-    MindmapOutput,
 )
 
 logger = logging.getLogger(__name__)
@@ -49,20 +47,14 @@ text_splitter = RecursiveCharacterTextSplitter(
 # --- Ollama Local Models ---
 llama3_llm = OllamaLLM(model="llama3", temperature=0.1)
 gemma_llm = OllamaLLM(model="gemma", temperature=0.1)
-phi3_llm = OllamaLLM(model="phi3", temperature=0.1)
 
-# Available models mapping
-AVAILABLE_MODELS = {
-    "llama3": llama3_llm,
-    "gemma": gemma_llm,
-    "phi3": phi3_llm
-}
-
-# Chat models (phi3 is used for mindmap generation)
+# Chat models
 CHAT_MODELS = {
     "llama3": llama3_llm,
     "gemma": gemma_llm
 }
+
+AVAILABLE_MODELS = CHAT_MODELS
 
 def get_available_models() -> List[str]:
     """Return list of available chat model names"""
@@ -71,31 +63,6 @@ def get_available_models() -> List[str]:
 def get_model_llm(model_name: str):
     """Get LLM instance by model name, defaults to llama3"""
     return CHAT_MODELS.get(model_name, llama3_llm)
-
-# --- Estimation functions ---
-def estimate_mindmap_generation_time(pdf_path: str) -> int:
-    try:
-        # Use PyMuPDFLoader to get document content
-        loader = PyMuPDFLoader(pdf_path)
-        documents = loader.load()
-        
-        if not documents:
-            logger.warning(f"No content in PDF for time estimation: {pdf_path}")
-            return 45
-        
-        # Combine all page content
-        pdf_text = "\n".join([doc.page_content for doc in documents])
-        char_count = len(pdf_text)
-        base_time_seconds = 15
-        chars_per_second_of_processing = 1000
-        estimated_time = base_time_seconds + (char_count / chars_per_second_of_processing)
-        max_time_seconds = 300
-        final_time = min(int(estimated_time), max_time_seconds)
-        logger.info(f"Estimated mindmap generation time for PDF with {char_count} chars: {final_time}s")
-        return final_time
-    except Exception as e:
-        logger.error(f"Could not estimate mindmap time for {pdf_path}: {e}")
-        return 45
 
 # --- RAG Helper Functions ---
 def _get_collection_name(pdf_path: str) -> str:
@@ -170,7 +137,7 @@ def _retrieve_context(query: str, collection_name: str, k: int = 3) -> str:
     return "\n\n--\n\n".join(context_parts)
 
 # --- Chat Functions (LCEL-based) ---
-async def chat_completion_LlamaModel_ws(
+async def chat_completion_llama_model_ws(
     text: str,
     history: List[Dict[str, str]],
     session_id: Optional[str] = None
@@ -200,21 +167,26 @@ async def chat_completion_LlamaModel_ws(
             
         except Exception as e:
             if isinstance(e, (httpx.ConnectError, ConnectionRefusedError, OSError)):
-                logger.error(f"LLM service connection error for Chat: {e}")
+                logger.exception(f"LLM service connection error for Chat: {e}")
                 yield None, (
                     "LLM service unreachable. Ensure the local LLM service (e.g. Ollama) is running "
                     "and listening (default: localhost:11434)."
                 )
                 return
-            logger.error(f"Chat generation failed: {e}", exc_info=True)
+            logger.exception(f"Chat generation failed: {e}")
             yield None, f"Error during chat completion: {e}"
             return
             
     except Exception as e:
-        logger.error(f"Llama3 Chat: {e}", exc_info=True)
+        logger.exception(f"Llama3 Chat: {e}")
         yield None, f"Error during Llama3 chat completion: {e}"
 
-async def chat_completion_Gemma_ws(
+
+# Backward compatibility alias
+chat_completion_LlamaModel_ws = chat_completion_llama_model_ws
+
+
+async def chat_completion_gemma_ws(
     text: str,
     history: List[Dict[str, str]],
     session_id: Optional[str] = None
@@ -237,8 +209,117 @@ async def chat_completion_Gemma_ws(
         
         yield full_response, None
     except Exception as e:
-        logger.error(f"Gemma Chat: {e}", exc_info=True)
+        logger.exception(f"Gemma Chat: {e}")
         yield None, f"Error during Gemma chat completion: {e}"
+
+
+# Backward compatibility alias
+chat_completion_Gemma_ws = chat_completion_gemma_ws
+
+async def _ensure_pdf_indexed(pdf_path: str) -> Tuple[Optional[str], Optional[str]]:
+    """Ensure a PDF is in ChromaDB. Returns (collection_name, error_message)."""
+    if not pdf_path:
+        return None, "Document path not provided."
+
+    collection_name = _get_collection_name(pdf_path)
+    if vectorstore_mgr.collection_exists(collection_name) and vectorstore_mgr.get_collection_count(collection_name) > 0:
+        return collection_name, None
+
+    resolved_path = resolve_pdf_path(pdf_path)
+    if not resolved_path or not os.path.exists(resolved_path):
+        logger.error(f"PDF not found at path: {pdf_path}")
+        return None, "The associated document could not be found."
+
+    try:
+        col_name = await asyncio.to_thread(_load_and_store_pdf, resolved_path)
+        return col_name, None
+    except Exception as e:
+        logger.exception(f"Failed to process PDF for ChromaDB: {e}")
+        return None, "The associated document could not be processed for context (empty content)."
+
+
+async def _collect_pdf_collections(pdf_paths: List[str]) -> List[str]:
+    """Collect ChromaDB collection names for all valid pdf_paths."""
+    collections = []
+    for path in pdf_paths:
+        col_name, _ = await _ensure_pdf_indexed(path)
+        if col_name:
+            collections.append(col_name)
+    return collections
+
+
+def _build_single_pdf_rag_chain(
+    collection_name: str,
+    text: str,
+    model: str,
+    history: List[Dict[str, str]],
+    session_id: Optional[str]
+):
+    """Build single PDF RAG chain and its input."""
+    if session_id:
+        chain = create_rag_chain_with_history(
+            collection_name=collection_name,
+            session_id=session_id,
+            model_name=model,
+            k=3
+        )
+        return chain, {"input": text}
+
+    from chains import create_rag_chain
+    chain = create_rag_chain(
+        collection_name=collection_name,
+        model_name=model,
+        k=3,
+        history=history[-(HISTORY_LENGTH * 2):]
+    )
+    return chain, text
+
+
+def _build_multi_pdf_rag_chain(
+    collection_names: List[str],
+    text: str,
+    model: str,
+    history: List[Dict[str, str]],
+    session_id: Optional[str]
+):
+    """Build multi-PDF RAG chain and its input."""
+    if session_id:
+        chain = create_multi_pdf_rag_chain_with_history(
+            collection_names=collection_names,
+            session_id=session_id,
+            model_name=model,
+            k=2
+        )
+        return chain, {"input": text}
+
+    from chains import create_multi_pdf_rag_chain
+    chain = create_multi_pdf_rag_chain(
+        collection_names=collection_names,
+        model_name=model,
+        k=2,
+        history=history[-(HISTORY_LENGTH * 2):]
+    )
+    return chain, text
+
+
+async def _stream_chain_response(chain, chain_input) -> Tuple[Optional[str], Optional[str]]:
+    """Execute LCEL chain streaming and handle connection errors."""
+    try:
+        full_response = ""
+        async for chunk in chain.astream(chain_input):
+            if chunk:
+                full_response += chunk
+        return full_response, None
+    except Exception as e:
+        if isinstance(e, (httpx.ConnectError, ConnectionRefusedError, OSError)):
+            logger.exception(f"LLM service connection error: {e}")
+            return None, (
+                "LLM service unreachable. Ensure the local LLM service (e.g. Ollama) is running "
+                "and listening (default: localhost:11434)."
+            )
+        logger.exception(f"RAG generation failed: {e}")
+        return None, f"Error during RAG completion: {e}"
+
 
 async def chat_completion_with_pdf_ws(
     text: str,
@@ -250,64 +331,19 @@ async def chat_completion_with_pdf_ws(
     """RAG completion using LCEL chain with single PDF."""
     logger.info(f"Initiating Main Chat RAG (LCEL) for text: {text[:50]} using PDF: {pdf_path} with model: {model}")
     try:
-        # Check PDF exists
-        if not os.path.exists(pdf_path):
-            logger.error(f"PDF not found at path for Main Chat RAG: {pdf_path}")
-            yield None, f"The associated document could not be found."
+        collection_name, error = await _ensure_pdf_indexed(pdf_path)
+        if error:
+            yield None, error
             return
-        
-        # Load and store PDF in ChromaDB (idempotent)
-        try:
-            collection_name = await asyncio.to_thread(_load_and_store_pdf, pdf_path)
-        except Exception as e:
-            logger.error(f"Failed to process PDF for ChromaDB: {e}")
-            yield None, "The associated document could not be processed for context (empty content)."
-            return
-        
-        # Create RAG chain with or without history
-        try:
-            if session_id:
-                chain = create_rag_chain_with_history(
-                    collection_name=collection_name,
-                    session_id=session_id,
-                    model_name=model,
-                    k=3
-                )
-                chain_input = {"input": text}
-            else:
-                # Backward compatibility - no session
-                from chains import create_rag_chain
-                chain = create_rag_chain(
-                    collection_name=collection_name,
-                    model_name=model,
-                    k=3,
-                    history=history[-(HISTORY_LENGTH * 2):]
-                )
-                chain_input = text
-            
-            # Stream response
-            full_response = ""
-            async for chunk in chain.astream(chain_input):
-                if chunk:
-                    full_response += chunk
-            
-            yield full_response, None
-            
-        except Exception as e:
-            if isinstance(e, (httpx.ConnectError, ConnectionRefusedError, OSError)):
-                logger.error(f"LLM service connection error for RAG: {e}")
-                yield None, (
-                    "LLM service unreachable. Ensure the local LLM service (e.g. Ollama) is running "
-                    "and listening (default: localhost:11434)."
-                )
-                return
-            logger.error(f"RAG generation failed: {e}", exc_info=True)
-            yield None, f"Error during RAG completion: {e}"
-            return
-            
+
+        chain, chain_input = _build_single_pdf_rag_chain(collection_name, text, model, history, session_id)
+        response, stream_error = await _stream_chain_response(chain, chain_input)
+        yield response, stream_error
+
     except Exception as e:
-        logger.error(f"Main Chat RAG: {e}", exc_info=True)
+        logger.exception(f"Main Chat RAG: {e}")
         yield None, f"Error during Main Chat RAG completion: {e}"
+
 
 async def chat_completion_with_multiple_pdfs_ws(
     text: str,
@@ -319,131 +355,18 @@ async def chat_completion_with_multiple_pdfs_ws(
     """Multi-PDF RAG completion using LCEL chain."""
     logger.info(f"Initiating Multi-PDF RAG (LCEL) for text: {text[:50]}... on {len(pdf_paths)} documents.")
     try:
-        # Load and store all PDFs, collect collection names
-        collection_names = []
-        for pdf_path in pdf_paths:
-            if not pdf_path or not os.path.exists(pdf_path):
-                logger.warning(f"skipping non-existent PDF for multi-RAG: {pdf_path}")
-                continue
-            
-            try:
-                collection_name = await asyncio.to_thread(_load_and_store_pdf, pdf_path)
-                collection_names.append(collection_name)
-            except Exception as e:
-                logger.error(f"Failed to process PDF {pdf_path}: {e}", exc_info=True)
-                continue
-        
+        collection_names = await _collect_pdf_collections(pdf_paths)
         if not collection_names:
             yield None, "No valid documents could be processed for context."
             return
-        
-        # Create multi-PDF RAG chain
-        try:
-            if session_id:
-                chain = create_multi_pdf_rag_chain_with_history(
-                    collection_names=collection_names,
-                    session_id=session_id,
-                    model_name=model,
-                    k=2
-                )
-                chain_input = {"input": text}
-            else:
-                from chains import create_multi_pdf_rag_chain
-                chain = create_multi_pdf_rag_chain(
-                    collection_names=collection_names,
-                    model_name=model,
-                    k=2,
-                    history=history[-(HISTORY_LENGTH * 2):]
-                )
-                chain_input = text
-            
-            # Stream response
-            full_response = ""
-            async for chunk in chain.astream(chain_input):
-                if chunk:
-                    full_response += chunk
-            
-            yield full_response, None
-            
-        except Exception as e:
-            logger.error(f"Multi-PDF RAG generation failed: {e}", exc_info=True)
-            yield None, f"Error during Multi-PDF RAG completion: {e}"
-            return
-            
-    except Exception as e:
-        logger.error(f"Multi-PDF RAG: {e}", exc_info=True)
-        yield None, f"Error during Multi-PDF RAG completion: {e}"
 
-# --- Mindmap Generation using phi3 ---
-async def generate_mindmap_from_pdf(pdf_path: str) -> Tuple[Optional[str], Optional[str]]:
-    """
-    Generate a Mermaid mindmap from PDF using phi3 model with MindmapOutputParser for validation.
-    Returns: (mindmap_markdown, error_message)
-    """
-    logger.info(f"Generating mindmap from PDF: {pdf_path}")
-    try:
-        # Load PDF using PyMuPDFLoader
-        loader = PyMuPDFLoader(pdf_path)
-        documents = await asyncio.to_thread(loader.load)
-        
-        if not documents:
-            error_msg = "No content extracted from PDF"
-            logger.error(error_msg)
-            return None, error_msg
-        
-        # Combine all pages into single text
-        pdf_text = "\n".join([doc.page_content for doc in documents])
-        
-        if not pdf_text or len(pdf_text.strip()) < 50:
-            error_msg = "PDF text is too short or empty to generate mindmap"
-            logger.error(error_msg)
-            return None, error_msg
-        
-        # Truncate text if too long (keep first 4000 chars for better performance)
-        if len(pdf_text) > 4000:
-            pdf_text = pdf_text[:4000] + "..."
-            logger.info(f"Truncated PDF text to 4000 characters for mindmap generation")
-        
-        # Generate mindmap using phi3
-        prompt = MINDMAP_PROMPT_TEMPLATE.format(pdf_text=pdf_text)
-        logger.info("Sending prompt to phi3 for mindmap generation...")
-        
-        response = await asyncio.to_thread(phi3_llm.generate, [prompt])
-        raw_mindmap = response.generations[0][0].text.strip()
-        
-        # Use MindmapOutputParser for validation and correction
-        mindmap_parser = MindmapOutputParser()
-        
-        try:
-            parsed_mindmap: MindmapOutput = mindmap_parser.parse(raw_mindmap)
-            logger.info(f"Mindmap validated successfully: {parsed_mindmap.node_count} nodes")
-            return parsed_mindmap.markdown, None
-        except Exception as parse_error:
-            # Fallback to legacy validation if structured parsing fails
-            logger.warning(f"Failed to parse mindmap with MindmapOutputParser: {parse_error}. Using fallback validation.")
-            mindmap_markdown = raw_mindmap
-            
-            # Legacy validation: Validate that we got Mermaid syntax
-            if not mindmap_markdown.startswith("mindmap"):
-                logger.warning("Generated mindmap doesn't start with 'mindmap', attempting to fix...")
-                if "mindmap" in mindmap_markdown.lower():
-                    # Try to extract the mindmap part
-                    lines = mindmap_markdown.split('\n')
-                    mindmap_start = next((i for i, line in enumerate(lines) if line.strip().lower() == "mindmap"), None)
-                    if mindmap_start is not None:
-                        mindmap_markdown = '\n'.join(lines[mindmap_start:])
-                    else:
-                        mindmap_markdown = "mindmap\n" + mindmap_markdown
-                else:
-                    mindmap_markdown = "mindmap\n" + mindmap_markdown
-            
-            logger.info(f"Mindmap generated successfully with fallback ({len(mindmap_markdown)} chars)")
-            return mindmap_markdown, None
-        
+        chain, chain_input = _build_multi_pdf_rag_chain(collection_names, text, model, history, session_id)
+        response, stream_error = await _stream_chain_response(chain, chain_input)
+        yield response, stream_error
+
     except Exception as e:
-        error_msg = f"Error generating mindmap: {str(e)}"
-        logger.error(error_msg, exc_info=True)
-        return None, error_msg
+        logger.exception(f"Multi-PDF RAG: {e}")
+        yield None, f"Error during Multi-PDF RAG completion: {e}"
 
 # --- Title Generation using llama3 ---
 async def generate_chat_title(messages_for_title_generation: List[Dict[str, str]]) -> Optional[str]:
@@ -480,7 +403,7 @@ async def generate_chat_title(messages_for_title_generation: List[Dict[str, str]
                 logger.warning("Title generation resulted in an empty string.")
                 return None
     except Exception as e:
-        logger.error(f"Failed to generate chat title: {e}", exc_info=True)
+        logger.exception(f"Failed to generate chat title: {e}")
         return None
 
-logger.info("ai_engine.py loaded with local Ollama models: llama3, gemma, phi3.")
+logger.info("ai_engine.py loaded with local Ollama models: llama3, gemma.")

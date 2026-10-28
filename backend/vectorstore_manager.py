@@ -107,7 +107,7 @@ class VectorStoreManager:
             logger.info(f"Added {len(documents)} documents to collection '{collection_name}'")
             return doc_ids
         except Exception as e:
-            logger.error(f"Failed to add documents to collection '{collection_name}': {e}")
+            logger.exception(f"Failed to add documents to collection '{collection_name}': {e}")
             raise
     
     def similarity_search(
@@ -137,7 +137,7 @@ class VectorStoreManager:
             logger.info(f"Found {len(results)} results for query in collection '{collection_name}'")
             return results
         except Exception as e:
-            logger.error(f"Similarity search failed in collection '{collection_name}': {e}")
+            logger.exception(f"Similarity search failed in collection '{collection_name}': {e}")
             raise
     
     def similarity_search_with_score(
@@ -167,7 +167,7 @@ class VectorStoreManager:
             logger.info(f"Found {len(results)} results with scores for query in collection '{collection_name}'")
             return results
         except Exception as e:
-            logger.error(f"Similarity search with score failed in collection '{collection_name}': {e}")
+            logger.exception(f"Similarity search with score failed in collection '{collection_name}': {e}")
             raise
     
     def delete_collection(self, collection_name: str) -> None:
@@ -186,7 +186,7 @@ class VectorStoreManager:
             self.client.delete_collection(name=collection_name)
             logger.info(f"Deleted collection: {collection_name}")
         except Exception as e:
-            logger.error(f"Failed to delete collection '{collection_name}': {e}")
+            logger.exception(f"Failed to delete collection '{collection_name}': {e}")
             raise
     
     def collection_exists(self, collection_name: str) -> bool:
@@ -203,7 +203,7 @@ class VectorStoreManager:
             collections = self.client.list_collections()
             return any(col.name == collection_name for col in collections)
         except Exception as e:
-            logger.error(f"Failed to check collection existence '{collection_name}': {e}")
+            logger.exception(f"Failed to check collection existence '{collection_name}': {e}")
             return False
     
     def get_collection_count(self, collection_name: str) -> int:
@@ -221,7 +221,7 @@ class VectorStoreManager:
             collection = vectorstore._collection
             return collection.count()
         except Exception as e:
-            logger.error(f"Failed to get count for collection '{collection_name}': {e}")
+            logger.exception(f"Failed to get count for collection '{collection_name}': {e}")
             return 0
     
     def list_collections(self) -> List[str]:
@@ -235,7 +235,7 @@ class VectorStoreManager:
             collections = self.client.list_collections()
             return [col.name for col in collections]
         except Exception as e:
-            logger.error(f"Failed to list collections: {e}")
+            logger.exception(f"Failed to list collections: {e}")
             return []
     
     def as_retriever(self, collection_name: str, **kwargs):

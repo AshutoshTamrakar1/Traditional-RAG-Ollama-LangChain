@@ -14,10 +14,3 @@ class ThreadNotFoundError(PDFBotException):
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Thread not found"
         )
-
-class SourceNotFoundError(PDFBotException):
-    def __init__(self):
-        super().__init__(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Source not found"
-        )

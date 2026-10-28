@@ -1,6 +1,6 @@
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Dict, Optional, Any
 from fastapi import APIRouter, HTTPException, status, Depends, Header
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -111,7 +111,7 @@ class UserProfileResponse(BaseModel):
     email: str
     username: str
     created_at: str
-    last_login: Optional[str]
+    last_login: Optional[str] = None
     active: bool
 
 
@@ -150,13 +150,13 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode = data.copy()
     
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
     to_encode.update({
         "exp": expire,
-        "iat": datetime.utcnow(),
+        "iat": datetime.now(timezone.utc),
         "jti": str(uuid.uuid4()),
         "type": "access"
     })
@@ -168,11 +168,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def create_refresh_token(data: dict) -> str:
     """Create JWT refresh token"""
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    expire = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
     
     to_encode.update({
         "exp": expire,
-        "iat": datetime.utcnow(),
+        "iat": datetime.now(timezone.utc),
         "jti": str(uuid.uuid4()),
         "type": "refresh"
     })
@@ -345,8 +345,8 @@ async def register(request: UserRegisterRequest):
             "email": email_clean,
             "username": username_clean,
             "password_hash": hashed_password,
-            "created_at": datetime.utcnow().isoformat(),
-            "updated_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(timezone.utc).isoformat(),
             "last_login": None,
             "active": True
         }
@@ -486,7 +486,7 @@ async def refresh_token(
         if old_payload.get("jti") and old_payload.get("exp"):
             await revoke_token(
                 old_payload["jti"],
-                datetime.utcfromtimestamp(old_payload["exp"])
+                datetime.fromtimestamp(old_payload["exp"], tz=timezone.utc)
             )
         
         logger.info(f"Tokens refreshed for user: {user_id}")
@@ -528,7 +528,7 @@ async def logout(
         except HTTPException:
             continue  # expired/invalid tokens need no revocation
         if payload.get("sub") == current_user and payload.get("jti") and payload.get("exp"):
-            await revoke_token(payload["jti"], datetime.utcfromtimestamp(payload["exp"]))
+            await revoke_token(payload["jti"], datetime.fromtimestamp(payload["exp"], tz=timezone.utc))
 
     return {
         "status": "success",
@@ -617,7 +617,7 @@ async def change_password(
             {
                 "$set": {
                     "password_hash": hashed_new_password,
-                    "updated_at": datetime.utcnow().isoformat()
+                    "updated_at": datetime.now(timezone.utc).isoformat()
                 }
             }
         )

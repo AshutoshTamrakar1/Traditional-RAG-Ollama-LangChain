@@ -30,6 +30,7 @@ podcasts/
 
 # IDE and editor files
 .vscode/
+.vs/
 .idea/
 *.swp
 *.swo

@@ -11,7 +11,7 @@ This module provides callback handlers for:
 
 import logging
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional
 from datetime import datetime
 
 from langchain_core.callbacks import BaseCallbackHandler, AsyncCallbackHandler
@@ -54,7 +54,7 @@ class StreamingCallbackHandler(AsyncCallbackHandler):
         logger.debug(f"LLM completed. Generated {len(self.tokens)} tokens")
     
     async def on_llm_error(
-        self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any
+        self, error: Exception | KeyboardInterrupt, **kwargs: Any
     ) -> None:
         """Called when LLM errors."""
         logger.error(f"LLM error: {error}")
@@ -112,7 +112,7 @@ class LoggingCallbackHandler(BaseCallbackHandler):
         )
     
     def on_llm_error(
-        self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any
+        self, error: Exception | KeyboardInterrupt, **kwargs: Any
     ) -> None:
         """Log when LLM errors."""
         run_id = kwargs.get("run_id", "unknown")
@@ -140,7 +140,7 @@ class LoggingCallbackHandler(BaseCallbackHandler):
         )
     
     def on_chain_error(
-        self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any
+        self, error: Exception | KeyboardInterrupt, **kwargs: Any
     ) -> None:
         """Log when chain errors."""
         run_id = kwargs.get("run_id", "unknown")
@@ -212,7 +212,7 @@ class PerformanceCallbackHandler(BaseCallbackHandler):
         self.metrics["tokens_generated"] += total_tokens
     
     def on_llm_error(
-        self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any
+        self, error: Exception | KeyboardInterrupt, **kwargs: Any
     ) -> None:
         """Track LLM errors."""
         self.metrics["errors"] += 1
@@ -233,7 +233,7 @@ class PerformanceCallbackHandler(BaseCallbackHandler):
         self.metrics["total_duration"] += duration
     
     def on_chain_error(
-        self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any
+        self, error: Exception | KeyboardInterrupt, **kwargs: Any
     ) -> None:
         """Track chain errors."""
         self.metrics["errors"] += 1
@@ -326,7 +326,7 @@ class WebSocketCallbackHandler(AsyncCallbackHandler):
             })
     
     async def on_llm_error(
-        self, error: Union[Exception, KeyboardInterrupt], **kwargs: Any
+        self, error: Exception | KeyboardInterrupt, **kwargs: Any
     ) -> None:
         """Send error to WebSocket."""
         if self.websocket_send:

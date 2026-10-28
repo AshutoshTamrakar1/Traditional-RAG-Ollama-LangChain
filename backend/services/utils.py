@@ -55,7 +55,7 @@ def verify_jwt_token(token: str) -> str:
         )
 
 
-async def get_user_from_token(authorization: Optional[str] = Header(None)) -> str:
+def get_user_from_token(authorization: Optional[str] = Header(None)) -> str:
     """Extract and validate user from Authorization header with JWT token"""
     if not authorization:
         logger.warning("Authorization header missing")
@@ -92,7 +92,60 @@ def ensure_upload_dir(user_id: str, thread_id: str, source_id: str, base_dir: Pa
         base_dir = Path(base_dir)
     upload_dir = base_dir / user_id / thread_id / source_id
     upload_dir.mkdir(parents=True, exist_ok=True)
-    return upload_dir
+    return upload_dir.resolve()
+
+
+UPLOADS_PREFIX = "uploads/"
+
+
+def _find_by_uploads_subpath(norm_path: str, project_root: Path, upload_dir: Path) -> Optional[str]:
+    """Check candidate file paths based on 'uploads/' substring."""
+    if UPLOADS_PREFIX not in norm_path:
+        return None
+    sub = norm_path[norm_path.index(UPLOADS_PREFIX):]
+    candidate = project_root / sub
+    if candidate.is_file():
+        return str(candidate.resolve())
+    candidate = upload_dir / sub[len(UPLOADS_PREFIX):]
+    if candidate.is_file():
+        return str(candidate.resolve())
+    return None
+
+
+def _find_by_filename(upload_dir: Path, filename: str) -> Optional[str]:
+    """Search for file by basename inside upload directory."""
+    if not filename or not upload_dir.exists():
+        return None
+    for match in upload_dir.rglob(filename):
+        if match.is_file():
+            return str(match.resolve())
+    return None
+
+
+def resolve_pdf_path(pdf_path: Optional[str]) -> Optional[str]:
+    """Resolve a PDF filepath across possible root, backend, or uploads directories."""
+    if not pdf_path:
+        return None
+
+    path_obj = Path(pdf_path)
+    if path_obj.is_file():
+        return str(path_obj.resolve())
+
+    # Project root is 2 levels up from backend/services/utils.py
+    project_root = Path(__file__).resolve().parent.parent.parent
+    upload_dir = Path(get_settings().UPLOAD_DIR)
+
+    for base in (project_root, upload_dir):
+        candidate = base / pdf_path
+        if candidate.is_file():
+            return str(candidate.resolve())
+
+    norm = pdf_path.replace("\\", "/")
+    found = _find_by_uploads_subpath(norm, project_root, upload_dir)
+    if found:
+        return found
+
+    return _find_by_filename(upload_dir, path_obj.name)
 
 
 async def handle_service_error(func: callable, *args, **kwargs) -> Dict[str, Any]:

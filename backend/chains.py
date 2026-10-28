@@ -8,11 +8,11 @@ Phase 4 additions: Callback integration for observability and monitoring.
 """
 
 import logging
-from typing import Dict, List, Optional, Any
+from typing import Dict, List, Optional, Final, Any
 from operator import itemgetter
 
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough, RunnableParallel, RunnableLambda
+from langchain_core.runnables import RunnablePassthrough, RunnableLambda
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.callbacks import BaseCallbackHandler
 from langchain_ollama import OllamaLLM
@@ -25,11 +25,13 @@ from prompts import (
 )
 from vectorstore_manager import get_vectorstore_manager
 from memory_manager import get_windowed_messages
-from callbacks import create_callback_manager, LoggingCallbackHandler, PerformanceCallbackHandler
+from callbacks import create_callback_manager
 from config import get_settings
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+DOC_SEPARATOR: Final[str] = "\n\n--\n\n"
 
 # ============================================================================
 # LLM INSTANCES
@@ -38,19 +40,13 @@ settings = get_settings()
 # Initialize Ollama models (same as ai_engine.py)
 llama3_llm = OllamaLLM(model="llama3", temperature=0.1)
 gemma_llm = OllamaLLM(model="gemma", temperature=0.1)
-phi3_llm = OllamaLLM(model="phi3", temperature=0.1)
-
-# Model mapping
-AVAILABLE_MODELS = {
-    "llama3": llama3_llm,
-    "gemma": gemma_llm,
-    "phi3": phi3_llm
-}
 
 CHAT_MODELS = {
     "llama3": llama3_llm,
     "gemma": gemma_llm
 }
+
+AVAILABLE_MODELS = CHAT_MODELS
 
 
 def get_llm(model_name: str = "llama3") -> OllamaLLM:
@@ -97,7 +93,7 @@ def format_docs(docs: List) -> str:
     Returns:
         Formatted context string
     """
-    return "\n\n--\n\n".join([doc.page_content for doc in docs])
+    return DOC_SEPARATOR.join([doc.page_content for doc in docs])
 
 
 def get_session_history(session_id: str, k: int = HISTORY_LENGTH) -> List:
@@ -389,7 +385,7 @@ def create_multi_pdf_rag_chain(
                     collection_name=col_name,
                     search_kwargs={'k': k}
                 )
-                docs = retriever.get_relevant_documents(query)
+                docs = retriever.invoke(query)
                 if docs:
                     context = format_docs(docs)
                     # Add source identifier
@@ -398,7 +394,7 @@ def create_multi_pdf_rag_chain(
                 logger.warning(f"Failed to retrieve from {col_name}: {e}")
                 continue
         
-        return "\n\n--\n\n".join(all_contexts) if all_contexts else "No context found."
+        return DOC_SEPARATOR.join(all_contexts) if all_contexts else "No context found."
     
     # LCEL chain for multi-PDF
     chain = (
@@ -465,7 +461,7 @@ def create_multi_pdf_rag_chain_with_history(
                     collection_name=col_name,
                     search_kwargs={'k': k}
                 )
-                docs = retriever.get_relevant_documents(query)
+                docs = retriever.invoke(query)
                 if docs:
                     context = format_docs(docs)
                     all_contexts.append(f"Context from {col_name}:\n{context}")
@@ -473,7 +469,7 @@ def create_multi_pdf_rag_chain_with_history(
                 logger.warning(f"Failed to retrieve from {col_name}: {e}")
                 continue
         
-        return "\n\n--\n\n".join(all_contexts) if all_contexts else "No context found."
+        return DOC_SEPARATOR.join(all_contexts) if all_contexts else "No context found."
     
     # LCEL chain with history
     chain = (
@@ -498,6 +494,47 @@ def create_multi_pdf_rag_chain_with_history(
 # ============================================================================
 # CHAIN FACTORY
 # ============================================================================
+
+def _build_chat_chain(
+    model_name: str,
+    session_id: Optional[str],
+    callbacks: Optional[List[BaseCallbackHandler]],
+    enable_observability: bool
+):
+    if session_id:
+        return create_chat_chain_with_history(model_name, session_id, callbacks, enable_observability)
+    return create_chat_chain(model_name, callbacks, enable_observability)
+
+
+def _build_rag_chain(
+    collection_name: Optional[str],
+    model_name: str,
+    session_id: Optional[str],
+    k: int,
+    callbacks: Optional[List[BaseCallbackHandler]],
+    enable_observability: bool
+):
+    if not collection_name:
+        raise ValueError("collection_name required for RAG chain")
+    if session_id:
+        return create_rag_chain_with_history(collection_name, session_id, model_name, k, callbacks, enable_observability)
+    return create_rag_chain(collection_name, model_name, k, callbacks, enable_observability)
+
+
+def _build_multi_rag_chain(
+    collection_names: Optional[List[str]],
+    model_name: str,
+    session_id: Optional[str],
+    k: int,
+    callbacks: Optional[List[BaseCallbackHandler]],
+    enable_observability: bool
+):
+    if not collection_names:
+        raise ValueError("collection_names required for multi-RAG chain")
+    if session_id:
+        return create_multi_pdf_rag_chain_with_history(collection_names, session_id, model_name, k, callbacks, enable_observability)
+    return create_multi_pdf_rag_chain(collection_names, model_name, k, callbacks, enable_observability)
+
 
 def get_chain(
     chain_type: str,
@@ -526,29 +563,12 @@ def get_chain(
         Appropriate chain instance
     """
     if chain_type == "chat":
-        if session_id:
-            return create_chat_chain_with_history(model_name, session_id, callbacks, enable_observability)
-        else:
-            return create_chat_chain(model_name, callbacks, enable_observability)
-    
-    elif chain_type == "rag":
-        if not collection_name:
-            raise ValueError("collection_name required for RAG chain")
-        if session_id:
-            return create_rag_chain_with_history(collection_name, session_id, model_name, k, callbacks, enable_observability)
-        else:
-            return create_rag_chain(collection_name, model_name, k, callbacks, enable_observability)
-    
-    elif chain_type == "multi_rag":
-        if not collection_names:
-            raise ValueError("collection_names required for multi-RAG chain")
-        if session_id:
-            return create_multi_pdf_rag_chain_with_history(collection_names, session_id, model_name, k, callbacks, enable_observability)
-        else:
-            return create_multi_pdf_rag_chain(collection_names, model_name, k, callbacks, enable_observability)
-    
-    else:
-        raise ValueError(f"Unknown chain type: {chain_type}")
+        return _build_chat_chain(model_name, session_id, callbacks, enable_observability)
+    if chain_type == "rag":
+        return _build_rag_chain(collection_name, model_name, session_id, k, callbacks, enable_observability)
+    if chain_type == "multi_rag":
+        return _build_multi_rag_chain(collection_names, model_name, session_id, k, callbacks, enable_observability)
+    raise ValueError(f"Unknown chain type: {chain_type}")
 
 
 logger.info("Chains module loaded with LCEL implementations")

@@ -21,15 +21,13 @@ _history_cache: Dict[str, MongoDBChatMessageHistory] = {}
 
 
 def get_mongodb_chat_history(
-    session_id: str,
-    user_id: Optional[str] = None
+    session_id: str
 ) -> MongoDBChatMessageHistory:
     """
     Get MongoDB-backed chat message history for a session.
     
     Args:
         session_id: Chat session ID
-        user_id: Optional user ID for scoping (not used in collection name but for context)
         
     Returns:
         MongoDBChatMessageHistory instance
@@ -138,7 +136,7 @@ def get_recent_messages(
         return recent
         
     except Exception as e:
-        logger.error(f"Failed to get recent messages for session {session_id}: {e}")
+        logger.exception(f"Failed to get recent messages for session {session_id}: {e}")
         return []
 
 
@@ -166,7 +164,7 @@ def add_message_to_history(
         logger.debug(f"Added {role} message to session {session_id}")
         
     except Exception as e:
-        logger.error(f"Failed to add message to session {session_id}: {e}")
+        logger.exception(f"Failed to add message to session {session_id}: {e}")
         raise
 
 
@@ -216,7 +214,7 @@ async def sync_memory_with_mongodb(session_id: str):
         logger.info(f"Synced {len(messages)} messages for session {session_id}")
         
     except Exception as e:
-        logger.error(f"Failed to sync memory for session {session_id}: {e}")
+        logger.exception(f"Failed to sync memory for session {session_id}: {e}")
         raise
 
 

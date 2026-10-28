@@ -1,15 +1,13 @@
 import reflex as rx
 import httpx
-from typing import List, Dict
-import asyncio
 
 BACKEND_URL = "http://localhost:8000"
+DEFAULT_CHAT_TITLE = "New Chat"
+MSG_SESSION_EXPIRED = "Session expired. Please log in again."
+PADDING_HALF_EM = "0.5em"
+COLOR_BLUE_100 = "blue.100"
+BORDER_SUBTLE = "1px solid #e2e8f0"
 
-# Shared authentication data (simple approach for state sharing)
-class SharedAuth(rx.Base):
-    access_token: str = ""
-    refresh_token: str = ""
-    user_id: str = ""
 
 class AuthState(rx.State):
     username: str = ""
@@ -54,7 +52,7 @@ class AuthState(rx.State):
                     print(f"[LOGIN SUCCESS] User {self.user_id} logged in, token: {self.access_token[:20]}...")
                     
                     # Redirect with auth info in URL (will be picked up by MainState)
-                    yield rx.redirect(f"/chat?access_token={self.access_token}&refresh_token={self.refresh_token}&user_id={self.user_id}")
+                    return rx.redirect(f"/chat?access_token={self.access_token}&refresh_token={self.refresh_token}&user_id={self.user_id}")
                 else:
                     error_data = response.json()
                     self.error = error_data.get("detail", "Login failed")
@@ -112,10 +110,10 @@ class AuthState(rx.State):
                     self.confirm_password = ""
                     # Redirect to chat with auth tokens
                     if self.access_token:
-                        yield rx.redirect(f"/chat?access_token={self.access_token}&refresh_token={self.refresh_token}&user_id={self.user_id}")
+                        return rx.redirect(f"/chat?access_token={self.access_token}&refresh_token={self.refresh_token}&user_id={self.user_id}")
                     else:
                         # Fallback to login page if no tokens
-                        yield rx.call_script("setTimeout(() => window.location.href = '/', 2000)")
+                        return rx.call_script("setTimeout(() => window.location.href = '/', 2000)")
                 else:
                     error_data = response.json()
                     self.error = error_data.get("detail", "Registration failed")
@@ -134,7 +132,7 @@ class MainState(rx.State):
     # Chat sessions
     chat_sessions: list[dict] = []
     current_chat_id: str = ""
-    current_chat_title: str = "New Chat"
+    current_chat_title: str = DEFAULT_CHAT_TITLE
     
     # Messages
     messages: list[dict] = []
@@ -143,14 +141,6 @@ class MainState(rx.State):
     # PDFs
     uploaded_pdfs: list[dict] = []
     active_source_ids: list[str] = []
-    
-    # Mindmap
-    show_mindmap: bool = False
-    mindmap_markdown: str = ""
-    mindmap_loading: bool = False
-    selected_pdf_for_mindmap: str = ""
-    mindmap_items: list[dict[str, str]] = []
-    expanded_nodes: list[str] = []
     
     # UI state
     error: str = ""
@@ -166,6 +156,16 @@ class MainState(rx.State):
         if not self.access_token:
             return {}
         return {"Authorization": f"Bearer {self.access_token}"}
+
+    def _update_session_title_in_list(self, chat_session_id: str, new_title: str):
+        """Update a chat session's title in chat_sessions state list"""
+        updated = []
+        for s in self.chat_sessions:
+            if s.get("chat_session_id") == chat_session_id:
+                updated.append({**s, "title": new_title})
+            else:
+                updated.append(s)
+        self.chat_sessions = updated
     
     async def refresh_access_token(self) -> bool:
         """Refresh access token using refresh token. Returns True if successful."""
@@ -175,7 +175,7 @@ class MainState(rx.State):
         
         try:
             async with httpx.AsyncClient(timeout=30.0) as client:
-                print(f"[REFRESH] Refreshing access token")
+                print("[REFRESH] Refreshing access token")
                 response = await client.post(
                     f"{BACKEND_URL}/auth/refresh",
                     headers={"Authorization": f"Bearer {self.refresh_token}"}
@@ -185,7 +185,7 @@ class MainState(rx.State):
                     data = response.json()
                     self.access_token = data["access_token"]
                     self.refresh_token = data.get("refresh_token", self.refresh_token)
-                    print(f"[REFRESH SUCCESS] Token refreshed")
+                    print("[REFRESH SUCCESS] Token refreshed")
                     return True
                 else:
                     print(f"[REFRESH ERROR] Failed with status {response.status_code}")
@@ -214,7 +214,7 @@ class MainState(rx.State):
             new_access_token = self.router.page.params.get("access_token", "")
             if new_access_token and new_access_token != self.access_token:
                 # New login detected - clear old state
-                print(f"[MAIN] New login detected, clearing old state")
+                print("[MAIN] New login detected, clearing old state")
                 self.access_token = new_access_token
                 self.refresh_token = self.router.page.params.get("refresh_token", "")
                 self.user_id = self.router.page.params.get("user_id", "")
@@ -233,15 +233,85 @@ class MainState(rx.State):
         # If no access token, user needs to login
         if not self.access_token:
             print("[MAIN] No access token, redirecting to login")
-            yield rx.redirect("/")
-            return
+            return rx.redirect("/")
         
-        # Create initial chat session if none exists
-        if not self.current_chat_id:
+        # Load user's existing chat sessions from backend
+        await self.load_chat_sessions()
+        
+        # Select active or most recent chat session, or create one if none exists
+        existing_ids = [s.get("chat_session_id") for s in self.chat_sessions]
+        if self.current_chat_id and self.current_chat_id in existing_ids:
+            await self.select_chat(self.current_chat_id)
+        elif self.chat_sessions:
+            await self.select_chat(self.chat_sessions[0]["chat_session_id"])
+        else:
             print("[MAIN] Creating initial chat session")
-            # Use async for to handle generator
-            async for _ in self.create_new_chat():
-                pass
+            await self.create_new_chat()
+
+    async def load_chat_sessions(self):
+        """Fetch the user's chat session history list from backend"""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{BACKEND_URL}/pdf/sessions",
+                    headers=self.get_auth_headers()
+                )
+                if response.status_code == 401 and await self.refresh_access_token():
+                    response = await client.get(
+                        f"{BACKEND_URL}/pdf/sessions",
+                        headers=self.get_auth_headers()
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    self.chat_sessions = data.get("sessions", [])
+                    print(f"[SESSIONS] Loaded {len(self.chat_sessions)} chat sessions")
+        except Exception as e:
+            print(f"[SESSIONS ERROR] {e}")
+
+    async def select_chat(self, chat_session_id: str):
+        """Load a specific chat session's messages and uploaded PDFs"""
+        if not chat_session_id:
+            return
+        print(f"[SELECT_CHAT] Loading chat session: {chat_session_id}")
+        self.error = ""
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                response = await client.get(
+                    f"{BACKEND_URL}/pdf/session/{chat_session_id}",
+                    headers=self.get_auth_headers()
+                )
+                if response.status_code == 401 and await self.refresh_access_token():
+                    response = await client.get(
+                        f"{BACKEND_URL}/pdf/session/{chat_session_id}",
+                        headers=self.get_auth_headers()
+                    )
+                if response.status_code == 200:
+                    data = response.json()
+                    self.current_chat_id = chat_session_id
+                    self.current_chat_title = data.get("title", DEFAULT_CHAT_TITLE)
+                    self.messages = data.get("messages", [])
+                    self.uploaded_pdfs = data.get("sources", [])
+                    self.active_source_ids = [
+                        s.get("source_id") or s.get("id")
+                        for s in self.uploaded_pdfs
+                        if s.get("source_id") or s.get("id")
+                    ]
+                    print(
+                        f"[SELECT_CHAT SUCCESS] Loaded {len(self.messages)} messages "
+                        f"and {len(self.uploaded_pdfs)} PDFs"
+                    )
+                else:
+                    self.error = "Failed to load chat session"
+        except Exception as e:
+            self.error = f"Error loading chat: {str(e)}"
+            print(f"[SELECT_CHAT EXCEPTION] {e}")
+
+    def toggle_source(self, source_id: str):
+        """Toggle whether an uploaded PDF is active for RAG queries"""
+        if source_id in self.active_source_ids:
+            self.active_source_ids = [sid for sid in self.active_source_ids if sid != source_id]
+        else:
+            self.active_source_ids = [*self.active_source_ids, source_id]
     
     async def create_new_chat(self):
         """Create a new chat session"""
@@ -255,33 +325,34 @@ class MainState(rx.State):
                     f"{BACKEND_URL}/pdf/session",
                     headers=self.get_auth_headers()
                 )
+                if response.status_code == 401 and await self.refresh_access_token():
+                    response = await client.post(
+                        f"{BACKEND_URL}/pdf/session",
+                        headers=self.get_auth_headers()
+                    )
                 
                 print(f"[CREATE_CHAT] Response status: {response.status_code}")
                 if response.status_code == 200:
                     data = response.json()
                     self.current_chat_id = data["chat_session_id"]
-                    self.current_chat_title = data.get("title", "New Chat")
+                    self.current_chat_title = data.get("title", DEFAULT_CHAT_TITLE)
                     self.messages = []
                     self.uploaded_pdfs = []
                     self.active_source_ids = []
                     
-                    # Add to sessions list (use chat_session_id key)
-                    self.chat_sessions.append({
-                        "chat_session_id": self.current_chat_id,
-                        "title": self.current_chat_title
-                    })
+                    # Prepend to sessions list so newest chat is at the top
+                    self.chat_sessions = [
+                        {
+                            "chat_session_id": self.current_chat_id,
+                            "title": self.current_chat_title
+                        },
+                        *self.chat_sessions
+                    ]
                     print(f"[CREATE_CHAT SUCCESS] Created chat session: {self.current_chat_id}")
                 elif response.status_code == 401:
-                    # Token expired, try to refresh
-                    print("[CREATE_CHAT] Token expired, attempting refresh...")
-                    if await self.refresh_access_token():
-                        # Retry with new token
-                        await self.create_new_chat()
-                    else:
-                        # Refresh failed, redirect to login
-                        self.error = "Session expired. Please log in again."
-                        print("[CREATE_CHAT ERROR] Token refresh failed")
-                        yield rx.redirect("/")
+                    self.error = MSG_SESSION_EXPIRED
+                    print("[CREATE_CHAT ERROR] Token refresh failed")
+                    return rx.redirect("/")
                 else:
                     self.error = "Failed to create chat session"
                     print(f"[CREATE_CHAT ERROR] {self.error}")
@@ -289,9 +360,80 @@ class MainState(rx.State):
             self.error = f"Error creating chat: {str(e)}"
             print(f"[CREATE_CHAT EXCEPTION] {e}")
     
+    def _sanitize_upload_filename(self, file) -> str:
+        """Extract and sanitize filename from upload file object."""
+        raw_filename = getattr(file, "filename", None) or getattr(file, "name", None) or ""
+        filename = raw_filename.replace("\\", "/").split("/")[-1]
+        if not filename or not filename.lower().endswith(".pdf"):
+            return (filename or "document") + ".pdf"
+        return filename
+
+    async def _post_pdf_file(self, client: httpx.AsyncClient, filename: str, file_data: bytes):
+        """Send a single PDF file upload request to backend with auth retry."""
+        files_data = {"file": (filename, file_data, "application/pdf")}
+        form_data = {"chat_session_id": self.current_chat_id}
+        print(f"[UPLOAD] Sending {filename} to {BACKEND_URL}/pdf/upload")
+        
+        response = await client.post(
+            f"{BACKEND_URL}/pdf/upload",
+            headers=self.get_auth_headers(),
+            data=form_data,
+            files=files_data
+        )
+        if response.status_code == 401 and await self.refresh_access_token():
+            response = await client.post(
+                f"{BACKEND_URL}/pdf/upload",
+                headers=self.get_auth_headers(),
+                data=form_data,
+                files=files_data
+            )
+        return response
+
+    def _process_upload_response(
+        self,
+        response,
+        filename: str,
+        uploaded_sources: list,
+        active_ids: list,
+        errors: list
+    ) -> bool:
+        """Process response for a single uploaded file. Returns False if upload loop should terminate."""
+        print(f"[UPLOAD] Response status for {filename}: {response.status_code}")
+        if response.status_code == 200:
+            data = response.json()
+            new_source = data["new_source"]
+            uploaded_sources.append(new_source)
+            if new_source["source_id"] not in active_ids:
+                active_ids.append(new_source["source_id"])
+            if data.get("new_title"):
+                self.current_chat_title = data["new_title"]
+                self._update_session_title_in_list(self.current_chat_id, data["new_title"])
+            print(f"[UPLOAD SUCCESS] PDF uploaded: {new_source['filename']}")
+            return True
+        
+        if response.status_code == 401:
+            errors.append(MSG_SESSION_EXPIRED)
+            return False
+            
+        detail = ""
+        try:
+            detail = response.json().get("detail", "")
+        except Exception:
+            pass
+        errors.append(f"{filename}: {detail}" if detail else f"Failed to upload {filename}")
+        return True
+
+    async def _ensure_chat_session_for_upload(self) -> bool:
+        """Ensure an active chat session exists before file upload."""
+        if self.current_chat_id:
+            return True
+        print("[UPLOAD] No active chat session, creating one first...")
+        await self.create_new_chat()
+        return bool(self.current_chat_id)
+
     async def upload_pdf(self, files: list):
-        """Upload PDF file"""
-        print(f"[UPLOAD] Uploading {len(files)} file(s)")
+        """Upload one or more PDF files"""
+        print(f"[UPLOAD] Uploading {len(files) if files else 0} file(s)")
         self.error = ""
         self.is_loading = True
         
@@ -300,231 +442,51 @@ class MainState(rx.State):
             self.is_loading = False
             return
         
-        # Ensure an active chat session exists before uploading
-        if not self.current_chat_id:
-            print("[UPLOAD] No active chat session, creating one first...")
-            await self.create_new_chat()
-            if not self.current_chat_id:
-                self.error = "Please start a chat session before uploading"
-                self.is_loading = False
-                return
+        if not await self._ensure_chat_session_for_upload():
+            self.error = "Please start a chat session before uploading"
+            self.is_loading = False
+            return
+        
+        uploaded_sources = list(self.uploaded_pdfs)
+        active_ids = list(self.active_source_ids)
+        errors = []
         
         try:
-            file = files[0]
-            raw_filename = getattr(file, "filename", None) or getattr(file, "name", None) or ""
-            # Strip directory prefixes for cross-platform safety
-            filename = raw_filename.replace("\\", "/").split("/")[-1]
-            if not filename or not filename.lower().endswith(".pdf"):
-                filename = (filename or "document") + ".pdf"
-            print(f"[UPLOAD] Processing file: {filename}")
-            
-            # Read file content
-            file_data = await file.read() if hasattr(file, 'read') else file
-            
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                files_data = {
-                    "file": (filename, file_data, "application/pdf")
-                }
-                form_data = {
-                    "chat_session_id": self.current_chat_id
-                }
-                
-                print(f"[UPLOAD] Sending to {BACKEND_URL}/pdf/upload")
-                response = await client.post(
-                    f"{BACKEND_URL}/pdf/upload",
-                    headers=self.get_auth_headers(),
-                    data=form_data,
-                    files=files_data
-                )
-                
-                print(f"[UPLOAD] Response status: {response.status_code}")
-                if response.status_code == 200:
-                    data = response.json()
-                    new_source = data["new_source"]
-                    self.uploaded_pdfs = [*self.uploaded_pdfs, new_source]
-                    self.active_source_ids = [*self.active_source_ids, new_source["source_id"]]
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                for file in files:
+                    filename = self._sanitize_upload_filename(file)
+                    print(f"[UPLOAD] Processing file: {filename}")
+                    file_data = await file.read() if hasattr(file, "read") else file
                     
-                    # Update title if changed
-                    if data.get("new_title"):
-                        self.current_chat_title = data["new_title"]
-                    
-                    self.show_upload = False
-                    self.error = ""
-                    print(f"[UPLOAD SUCCESS] PDF uploaded: {new_source['filename']}")
-                elif response.status_code == 401:
-                    # Token expired, try to refresh
-                    print("[UPLOAD] Token expired, attempting refresh...")
-                    if await self.refresh_access_token():
-                        # Retry upload
-                        await self.upload_pdf(files)
-                    else:
-                        self.error = "Session expired. Please log in again."
-                        print("[UPLOAD ERROR] Token refresh failed")
-                else:
-                    detail = ""
-                    try:
-                        detail = response.json().get("detail", "")
-                    except Exception:
-                        pass
-                    self.error = f"Upload failed: {detail}" if detail else "Upload failed"
-                    print(f"[UPLOAD ERROR] {self.error}")
+                    response = await self._post_pdf_file(client, filename, file_data)
+                    should_continue = self._process_upload_response(
+                        response, filename, uploaded_sources, active_ids, errors
+                    )
+                    if not should_continue:
+                        break
+            
+            self.uploaded_pdfs = uploaded_sources
+            self.active_source_ids = active_ids
+            
+            if errors:
+                self.error = "; ".join(errors)
+                print(f"[UPLOAD ERROR] {self.error}")
+            else:
+                self.show_upload = False
+                self.error = ""
         except Exception as e:
             self.error = f"Upload error: {str(e)}"
             print(f"[UPLOAD EXCEPTION] {e}")
         finally:
             self.is_loading = False
     
-    async def generate_mindmap(self, source_id: str):
-        """Generate mindmap from PDF"""
-        print(f"[MINDMAP] Generating mindmap for source: {source_id}")
-        self.mindmap_loading = True
-        self.error = ""
-        
-        try:
-            async with httpx.AsyncClient(timeout=300.0) as client:
-                payload = {
-                    "chat_session_id": self.current_chat_id,
-                    "source_id": source_id
-                }
-                
-                print(f"[MINDMAP] Sending request to {BACKEND_URL}/mindmap/generate")
-                response = await client.post(
-                    f"{BACKEND_URL}/mindmap/generate",
-                    headers=self.get_auth_headers(),
-                    json=payload
-                )
-                
-                print(f"[MINDMAP] Response status: {response.status_code}")
-                if response.status_code == 200:
-                    data = response.json()
-                    self.mindmap_markdown = data["markdown"]
-                    self.parse_mindmap_text(self.mindmap_markdown)
-                    self.show_mindmap = True
-                    self.selected_pdf_for_mindmap = source_id
-                    print(f"[MINDMAP SUCCESS] Generated {len(self.mindmap_markdown)} chars")
-                elif response.status_code == 401:
-                    # Token expired, try to refresh
-                    print("[MINDMAP] Token expired, attempting refresh...")
-                    if await self.refresh_access_token():
-                        # Retry mindmap generation
-                        await self.generate_mindmap(source_id)
-                    else:
-                        self.error = "Session expired. Please log in again."
-                        print("[MINDMAP ERROR] Token refresh failed")
-                else:
-                    self.error = f"Mindmap generation failed: {response.text}"
-                    print(f"[MINDMAP ERROR] {self.error}")
-        except Exception as e:
-            self.error = f"Mindmap error: {str(e)}"
-            print(f"[MINDMAP EXCEPTION] {e}")
-        finally:
-            self.mindmap_loading = False
-    
-    async def generate_mindmap_from_active_pdfs(self):
-        """Generate mindmap from the first uploaded PDF in current chat"""
-        print(f"[MINDMAP] Generating mindmap from active PDFs")
-        
-        if not self.uploaded_pdfs:
-            self.error = "Please upload a PDF first"
-            return
-        
-        # Use the first uploaded PDF
-        first_pdf = self.uploaded_pdfs[0]
-        source_id = first_pdf.get("source_id")
-        
-        if not source_id:
-            self.error = "No valid PDF source found"
-            return
-        
-        # Call the existing generate_mindmap function
-        await self.generate_mindmap(source_id)
-    
-    def parse_mindmap_text(self, text: str):
-        """Parse mindmap text into hierarchical list with parent-child relationships"""
-        lines = text.strip().split('\n')
-        items = []
-        current_id = 0
-        stack = []  # Stack to track parent IDs at each level
-        
-        for line in lines:
-            if not line.strip() or line.strip().startswith('mindmap'):
-                continue
-            
-            # Detect indent level
-            stripped = line.lstrip()
-            indent = (len(line) - len(stripped)) // 2  # Normalize to 0, 1, 2, 3...
-            text_content = stripped.strip()
-            
-            # Skip if empty
-            if not text_content:
-                continue
-            
-            # Extract root title
-            if 'root((' in text_content:
-                title = text_content.split('((')[1].split('))')[0] if '((' in text_content else text_content
-                items.append({
-                    "id": "root",
-                    "title": title,
-                    "level": "0",
-                    "parent_id": "",
-                    "has_children": "false"
-                })
-                stack = [(0, "root")]  # (indent_level, node_id)
-                continue
-            
-            # Create item
-            current_id += 1
-            item_id = f"node_{current_id}"
-            
-            # Find parent based on indentation
-            while stack and stack[-1][0] >= indent:
-                stack.pop()
-            
-            parent_id = stack[-1][1] if stack else ""
-            
-            items.append({
-                "id": item_id,
-                "title": text_content.replace(':', ' -'),
-                "level": str(indent),
-                "parent_id": parent_id,
-                "has_children": "false"  # Will be updated
-            })
-            
-            # Mark parent as having children
-            if parent_id:
-                for item in items:
-                    if item["id"] == parent_id:
-                        item["has_children"] = "true"
-                        break
-            
-            stack.append((indent, item_id))
-        
-        self.mindmap_items = items
-        self.expanded_nodes = ["root"]  # Start with root expanded
-    
-    def toggle_node(self, node_id: str):
-        """Toggle expand/collapse state of a node"""
-        if node_id in self.expanded_nodes:
-            self.expanded_nodes.remove(node_id)
-        else:
-            self.expanded_nodes.append(node_id)
-    
-    def toggle_mindmap(self):
-        """Toggle mindmap modal"""
-        self.show_mindmap = not self.show_mindmap
-        if not self.show_mindmap:
-            self.mindmap_markdown = ""
-            self.selected_pdf_for_mindmap = ""
-            self.mindmap_items = []
-            self.expanded_nodes = []
-    
     async def handle_upload(self, files: list[rx.UploadFile]):
         """Handle file upload from rx.upload component"""
-        print(f"[HANDLE_UPLOAD] Files received: {files}")
+        print(f"[HANDLE_UPLOAD] Files received: {len(files) if files else 0}")
         await self.upload_pdf(files)
         return rx.clear_selected_files("pdf_upload")
     
-    async def send_message(self):
+    async def send_message(self, _form_data: dict = None):
         """Send chat message"""
         print(f"[SEND_MSG] Sending message: {self.user_input[:50]}...")
         
@@ -561,6 +523,13 @@ class MainState(rx.State):
                     json=payload
                 )
                 
+                if response.status_code == 401 and await self.refresh_access_token():
+                    response = await client.post(
+                        f"{BACKEND_URL}/chat/send",
+                        headers=self.get_auth_headers(),
+                        json=payload
+                    )
+                
                 print(f"[SEND_MSG] Response status: {response.status_code}")
                 if response.status_code == 200:
                     data = response.json()
@@ -568,19 +537,12 @@ class MainState(rx.State):
                     self.messages = [*self.messages, {"role": "assistant", "content": assistant_msg}]
                     print(f"[SEND_MSG SUCCESS] Got response: {assistant_msg[:50]}...")
                     
-                    # Refresh chat title if this was the first message
-                    if self.current_chat_title == "New Chat" and len(self.messages) == 2:
+                    # Refresh chat title if this was the first message turn
+                    if len(self.messages) == 2:
                         await self.refresh_chat_title()
                 elif response.status_code == 401:
-                    # Token expired, try to refresh
-                    print("[SEND_MSG] Token expired, attempting refresh...")
-                    if await self.refresh_access_token():
-                        # Retry send message
-                        self.user_input = user_msg  # Restore message
-                        await self.send_message()
-                    else:
-                        self.error = "Session expired. Please log in again."
-                        print("[SEND_MSG ERROR] Token refresh failed")
+                    self.error = MSG_SESSION_EXPIRED
+                    print("[SEND_MSG ERROR] Token refresh failed")
                 else:
                     error_data = response.json()
                     self.error = error_data.get("detail", "Failed to send message")
@@ -603,21 +565,25 @@ class MainState(rx.State):
                 response = await client.get(f"{BACKEND_URL}/chat/models")
                 if response.status_code == 200:
                     data = response.json()
-                    self.available_models = data.get("models", ["llama3", "gemma", "phi3"])
+                    self.available_models = data.get("models", ["llama3", "gemma"])
                     self.selected_model = data.get("default", "llama3")
                     print(f"[MODELS] Loaded: {self.available_models}")
         except Exception as e:
             print(f"[MODELS ERROR] {e}")
-            self.available_models = ["llama3", "gemma", "phi3"]
+            self.available_models = ["llama3", "gemma"]
     
     def set_model(self, model: str):
         """Set selected chat model"""
         self.selected_model = model
         print(f"[MODEL] Selected: {model}")
+
+    def set_user_input(self, val: str):
+        """Update user input text"""
+        self.user_input = val
     
     async def logout(self):
         """Logout user and invalidate JWT tokens on backend"""
-        print(f"[LOGOUT] Logging out user")
+        print("[LOGOUT] Logging out user")
         
         # Call backend to invalidate tokens (optional - JWT is stateless)
         if self.access_token:
@@ -651,190 +617,20 @@ class MainState(rx.State):
                     f"{BACKEND_URL}/pdf/session/{self.current_chat_id}",
                     headers=self.get_auth_headers()
                 )
+                if response.status_code == 401 and await self.refresh_access_token():
+                    response = await client.get(
+                        f"{BACKEND_URL}/pdf/session/{self.current_chat_id}",
+                        headers=self.get_auth_headers()
+                    )
                 if response.status_code == 200:
                     data = response.json()
-                    new_title = data.get("title", "New Chat")
-                    if new_title != "New Chat":
+                    new_title = data.get("title", DEFAULT_CHAT_TITLE)
+                    if new_title != DEFAULT_CHAT_TITLE:
                         self.current_chat_title = new_title
-                        # Update in sessions list
-                        for session in self.chat_sessions:
-                            if session.get("chat_session_id") == self.current_chat_id:
-                                session["title"] = new_title
+                        self._update_session_title_in_list(self.current_chat_id, new_title)
                         print(f"[TITLE] Updated to: {new_title}")
-                elif response.status_code == 401:
-                    # Token expired, try to refresh
-                    print("[TITLE] Token expired, attempting refresh...")
-                    if await self.refresh_access_token():
-                        # Retry
-                        await self.refresh_chat_title()
         except Exception as e:
             print(f"[TITLE ERROR] {e}")
-
-
-def render_mindmap_item(item: dict) -> rx.Component:
-    """Render a single mindmap item as a tree node with expand/collapse"""
-    # Determine indentation based on level
-    indent_px = rx.cond(
-        item["level"] == "0", "0px",
-        rx.cond(item["level"] == "1", "20px",
-        rx.cond(item["level"] == "2", "40px",
-        rx.cond(item["level"] == "3", "60px", "80px")))
-    )
-    
-    # Color coding based on level
-    return rx.cond(
-        item["level"] == "0",
-        # Level 0 (root) - Blue
-        rx.vstack(
-            rx.hstack(
-                rx.cond(
-                    item["has_children"] == "true",
-                    rx.button(
-                        rx.cond(
-                            MainState.expanded_nodes.contains(item["id"]),
-                            "▼",
-                            "▶"
-                        ),
-                        on_click=lambda id=item["id"]: MainState.toggle_node(id),
-                        size="1",
-                        variant="ghost",
-                        color="blue.700",
-                    ),
-                    rx.box(width="20px"),
-                ),
-                rx.box(
-                    rx.text(item["title"], font_weight="700", font_size="1.3em", color="black"),
-                    padding="0.6em 1.2em",
-                    bg="blue.200",
-                    border_radius="0.5em",
-                    border="2px solid var(--blue-700)",
-                    flex="1",
-                ),
-                width="100%",
-                align="center",
-                margin_left=indent_px,
-            ),
-            width="100%",
-            spacing="1",
-        ),
-        rx.cond(
-            item["level"] == "1",
-            # Level 1 - Green
-            rx.cond(
-                (MainState.expanded_nodes.contains(item["parent_id"])) | (item["parent_id"] == ""),
-                rx.vstack(
-                    rx.hstack(
-                        rx.cond(
-                            item["has_children"] == "true",
-                            rx.button(
-                                rx.cond(
-                                    MainState.expanded_nodes.contains(item["id"]),
-                                    "▼",
-                                    "▶"
-                                ),
-                                on_click=lambda id=item["id"]: MainState.toggle_node(id),
-                                size="1",
-                                variant="ghost",
-                                color="green.700",
-                            ),
-                            rx.box(width="20px"),
-                        ),
-                        rx.box(
-                            rx.text(item["title"], font_weight="600", font_size="1.1em", color="black"),
-                            padding="0.5em 1em",
-                            bg="green.100",
-                            border_radius="0.5em",
-                            border_left="4px solid var(--green-600)",
-                            flex="1",
-                        ),
-                        width="100%",
-                        align="center",
-                        margin_left=indent_px,
-                    ),
-                    width="100%",
-                    spacing="1",
-                ),
-                rx.box(),  # Hidden if parent not expanded
-            ),
-            rx.cond(
-                item["level"] == "2",
-                # Level 2 - Purple
-                rx.cond(
-                    MainState.expanded_nodes.contains(item["parent_id"]),
-                    rx.vstack(
-                        rx.hstack(
-                            rx.cond(
-                                item["has_children"] == "true",
-                                rx.button(
-                                    rx.cond(
-                                        MainState.expanded_nodes.contains(item["id"]),
-                                        "▼",
-                                        "▶"
-                                    ),
-                                    on_click=lambda id=item["id"]: MainState.toggle_node(id),
-                                    size="1",
-                                    variant="ghost",
-                                    color="purple.700",
-                                ),
-                                rx.box(width="20px"),
-                            ),
-                            rx.box(
-                                rx.text(item["title"], font_weight="500", font_size="1.0em", color="black"),
-                                padding="0.4em 0.9em",
-                                bg="purple.50",
-                                border_radius="0.5em",
-                                border_left="4px solid var(--purple-500)",
-                                flex="1",
-                            ),
-                            width="100%",
-                            align="center",
-                            margin_left=indent_px,
-                        ),
-                        width="100%",
-                        spacing="1",
-                    ),
-                    rx.box(),  # Hidden if parent not expanded
-                ),
-                # Level 3+ - Orange
-                rx.cond(
-                    MainState.expanded_nodes.contains(item["parent_id"]),
-                    rx.vstack(
-                        rx.hstack(
-                            rx.cond(
-                                item["has_children"] == "true",
-                                rx.button(
-                                    rx.cond(
-                                        MainState.expanded_nodes.contains(item["id"]),
-                                        "▼",
-                                        "▶"
-                                    ),
-                                    on_click=lambda id=item["id"]: MainState.toggle_node(id),
-                                    size="1",
-                                    variant="ghost",
-                                    color="orange.700",
-                                ),
-                                rx.box(width="20px"),
-                            ),
-                            rx.box(
-                                rx.text(item["title"], font_weight="500", font_size="0.95em", color="black"),
-                                padding="0.4em 0.8em",
-                                bg="orange.50",
-                                border_radius="0.4em",
-                                border_left="3px solid var(--orange-500)",
-                                flex="1",
-                            ),
-                            width="100%",
-                            align="center",
-                            margin_left=indent_px,
-                        ),
-                        width="100%",
-                        spacing="1",
-                    ),
-                    rx.box(),  # Hidden if parent not expanded
-                ),
-            ),
-        ),
-    )
 
 
 def login_page():
@@ -862,6 +658,7 @@ def login_page():
         ),
         padding="4em",
     )
+
 
 def register_page():
     return rx.container(
@@ -900,6 +697,107 @@ def register_page():
         padding="4em",
     )
 
+
+def _render_user_message(msg):
+    return rx.hstack(
+        rx.spacer(),
+        rx.box(
+            rx.text(
+                msg["content"],
+                size="3",
+                white_space="pre-wrap",
+                line_height="1.5",
+            ),
+            background_color="var(--blue-9)",
+            color="white",
+            padding="0.75rem 1.15rem",
+            border_radius="16px 16px 4px 16px",
+            max_width="75%",
+            box_shadow="0 2px 6px rgba(0, 0, 0, 0.12)",
+        ),
+        rx.avatar(
+            fallback="U",
+            size="2",
+            variant="solid",
+            color_scheme="blue",
+            radius="full",
+        ),
+        width="100%",
+        align="end",
+        spacing="3",
+    )
+
+
+def _render_assistant_message(msg):
+    return rx.hstack(
+        rx.avatar(
+            fallback="AI",
+            size="2",
+            variant="soft",
+            color_scheme="violet",
+            radius="full",
+        ),
+        rx.box(
+            rx.markdown(
+                msg["content"],
+            ),
+            background_color="var(--gray-a2)",
+            border="1px solid var(--gray-a4)",
+            padding="1rem 1.25rem",
+            border_radius="4px 16px 16px 16px",
+            max_width="85%",
+            box_shadow="0 1px 4px rgba(0, 0, 0, 0.05)",
+            line_height="1.65",
+            width="100%",
+        ),
+        rx.spacer(),
+        width="100%",
+        align="start",
+        spacing="3",
+    )
+
+
+def render_chat_message(msg):
+    return rx.cond(
+        msg["role"] == "user",
+        _render_user_message(msg),
+        _render_assistant_message(msg),
+    )
+
+
+def _render_welcome_screen():
+    return rx.center(
+        rx.vstack(
+            rx.avatar(fallback="AI", size="5", variant="soft", color_scheme="violet"),
+            rx.heading("PDF RAG Assistant", size="6", weight="bold"),
+            rx.text(
+                "Upload PDF documents or choose a chat from the sidebar to ask questions with grounded context.",
+                size="3",
+                color="gray",
+                text_align="center",
+                max_width="480px",
+            ),
+            rx.button(
+                rx.hstack(
+                    rx.icon("paperclip", size=18),
+                    rx.text("Upload PDFs to Begin"),
+                    spacing="2",
+                    align="center",
+                ),
+                on_click=MainState.toggle_upload,
+                size="3",
+                variant="solid",
+                color_scheme="blue",
+            ),
+            align="center",
+            spacing="4",
+            padding="2em",
+        ),
+        height="100%",
+        width="100%",
+    )
+
+
 def chat_page():
     """Main chat interface with sidebar"""
     return rx.box(
@@ -913,36 +811,79 @@ def chat_page():
                     width="100%"
                 ),
                 rx.divider(),
-                rx.foreach(
-                    MainState.chat_sessions,
-                    lambda session: rx.box(
-                        rx.text(session["title"]),
-                        padding="0.5em",
-                        _hover={"bg": "gray.100", "cursor": "pointer"},
-                    )
-                ),
-                rx.spacer(),
-                rx.divider(),
-                rx.text("Uploaded PDFs:", font_weight="bold", size="2"),
-                rx.foreach(
-                    MainState.uploaded_pdfs,
-                    lambda pdf: rx.box(
-                        rx.hstack(
-                            rx.text(pdf["filename"], size="1", flex="1"),
-                            rx.button(
-                                "🗺️",
-                                size="1",
-                                on_click=lambda: MainState.generate_mindmap(pdf["source_id"]),
-                                title="Generate Mindmap",
-                            ),
-                            spacing="1",
-                            width="100%",
+                rx.box(
+                    rx.vstack(
+                        rx.foreach(
+                            MainState.chat_sessions,
+                            lambda session: rx.box(
+                                rx.text(
+                                    session["title"],
+                                    size="2",
+                                    weight=rx.cond(
+                                        MainState.current_chat_id == session["chat_session_id"],
+                                        "bold",
+                                        "regular"
+                                    ),
+                                ),
+                                padding=PADDING_HALF_EM,
+                                width="100%",
+                                border_radius="0.375em",
+                                bg=rx.cond(
+                                    MainState.current_chat_id == session["chat_session_id"],
+                                    COLOR_BLUE_100,
+                                    "transparent"
+                                ),
+                                _hover={"bg": "gray.200", "cursor": "pointer"},
+                                on_click=getattr(MainState, "select_chat")(session["chat_session_id"]),  # NOSONAR
+                            )
                         ),
-                        padding="0.25em",
-                        bg="blue.50",
-                        border_radius="0.25em",
-                        margin="0.25em 0",
-                    )
+                        spacing="1",
+                        width="100%",
+                    ),
+                    flex="1",
+                    width="100%",
+                    overflow_y="auto",
+                ),
+                rx.divider(),
+                rx.text("Uploaded PDFs (click to toggle):", font_weight="bold", size="2"),
+                rx.box(
+                    rx.vstack(
+                        rx.foreach(
+                            MainState.uploaded_pdfs,
+                            lambda pdf: rx.box(
+                                rx.hstack(
+                                    rx.text(
+                                        rx.cond(
+                                            MainState.active_source_ids.contains(pdf["source_id"]),
+                                            "✓",
+                                            "○"
+                                        ),
+                                        size="1",
+                                        weight="bold",
+                                    ),
+                                    rx.text(pdf["filename"], size="1", flex="1"),
+                                    spacing="2",
+                                    width="100%",
+                                    align="center",
+                                ),
+                                padding="0.35em 0.5em",
+                                bg=rx.cond(
+                                    MainState.active_source_ids.contains(pdf["source_id"]),
+                                    COLOR_BLUE_100,
+                                    "gray.100"
+                                ),
+                                border_radius="0.25em",
+                                width="100%",
+                                _hover={"cursor": "pointer", "opacity": "0.85"},
+                                on_click=getattr(MainState, "toggle_source")(pdf["source_id"]),  # NOSONAR
+                            )
+                        ),
+                        spacing="1",
+                        width="100%",
+                    ),
+                    max_height="200px",
+                    overflow_y="auto",
+                    width="100%",
                 ),
                 rx.divider(),
                 rx.button(
@@ -971,96 +912,120 @@ def chat_page():
             rx.vstack(
                 # Header
                 rx.hstack(
-                    rx.heading(MainState.current_chat_title, size="7"),
+                    rx.heading(MainState.current_chat_title, size="5", weight="bold"),
                     rx.spacer(),
-                    rx.button(
-                        "📎 Upload PDF",
-                        on_click=MainState.toggle_upload,
+                    rx.hstack(
+                        rx.text("Model:", size="2", color="gray", weight="medium"),
+                        rx.select(
+                            MainState.available_models,
+                            value=MainState.selected_model,
+                            on_change=MainState.set_model,
+                            size="2",
+                        ),
+                        rx.button(
+                            rx.hstack(
+                                rx.icon("paperclip", size=16),
+                                rx.text("Upload PDFs", size="2"),
+                                spacing="1",
+                                align="center",
+                            ),
+                            on_click=MainState.toggle_upload,
+                            size="2",
+                            variant="surface",
+                        ),
+                        spacing="3",
+                        align="center",
                     ),
                     width="100%",
-                    padding="1em",
-                    border_bottom="1px solid #e2e8f0",
+                    padding="0.85em 1.5em",
+                    border_bottom=BORDER_SUBTLE,
+                    align="center",
                 ),
                 # Messages
                 rx.box(
-                    rx.foreach(
-                        MainState.messages,
-                        lambda msg: rx.box(
-                            rx.text(
-                                msg["content"],
-                                bg=rx.cond(
-                                    msg["role"] == "user",
-                                    "blue.100",
-                                    "gray.100"
-                                ),
-                                padding="1em",
-                                border_radius="0.5em",
-                                max_width="70%",
-                                margin_left=rx.cond(
-                                    msg["role"] == "user",
-                                    "auto",
-                                    "0"
-                                ),
+                    rx.cond(
+                        MainState.messages.length() == 0,
+                        _render_welcome_screen(),
+                        rx.box(
+                            rx.vstack(
+                                rx.foreach(MainState.messages, render_chat_message),
+                                spacing="4",
+                                width="100%",
                             ),
+                            max_width="880px",
                             width="100%",
-                            padding="0.5em",
-                        )
+                            margin_x="auto",
+                            padding_x="1em",
+                        ),
                     ),
                     flex="1",
                     overflow_y="auto",
-                    padding="1em",
+                    padding_y="1.5em",
                     width="100%",
-                ),
-                # Error message
-                rx.cond(
-                    MainState.error != "",
-                    rx.text(MainState.error, color="red", padding="0.5em"),
-                ),
-                # Model selector and mindmap button
-                rx.hstack(
-                    rx.text("Model:", font_weight="500"),
-                    rx.select(
-                        MainState.available_models,
-                        value=MainState.selected_model,
-                        on_change=MainState.set_model,
-                    ),
-                    rx.spacer(),
-                    rx.button(
-                        "Generate Mindmap",
-                        on_click=MainState.generate_mindmap_from_active_pdfs,
-                        is_loading=MainState.mindmap_loading,
-                        is_disabled=MainState.uploaded_pdfs.length() == 0,
-                        color_scheme="blue",
-                        size="2",
-                    ),
-                    padding="0.5em 1em",
-                    spacing="2",
-                    border_top="1px solid #e2e8f0",
-                    width="100%",
-                    align="center",
                 ),
                 # Input area
-                rx.hstack(
-                    rx.input(
-                        placeholder="Type your message...",
-                        value=MainState.user_input,
-                        on_change=MainState.set_user_input,
-                        flex="1",
-                    ),
-                    rx.button(
-                        "Send",
-                        on_click=MainState.send_message,
-                        is_loading=MainState.is_loading,
+                rx.box(
+                    rx.box(
+                        rx.cond(
+                            MainState.error != "",
+                            rx.box(
+                                rx.hstack(
+                                    rx.icon("circle-alert", size=16, color="red"),
+                                    rx.text(MainState.error, color="red", size="2"),
+                                    spacing="2",
+                                    align="center",
+                                ),
+                                padding_bottom="0.5em",
+                            ),
+                        ),
+                        rx.form(
+                            rx.hstack(
+                                rx.input(
+                                    placeholder="Ask a question about your documents...",
+                                    value=MainState.user_input,
+                                    on_change=MainState.set_user_input,
+                                    flex="1",
+                                    size="3",
+                                    variant="surface",
+                                    radius="large",
+                                ),
+                                rx.button(
+                                    rx.cond(
+                                        MainState.is_loading,
+                                        rx.spinner(size="2"),
+                                        rx.icon("send", size=18),
+                                    ),
+                                    type="submit",
+                                    size="3",
+                                    radius="large",
+                                    color_scheme="blue",
+                                    variant="solid",
+                                    disabled=MainState.is_loading,
+                                ),
+                                width="100%",
+                                spacing="3",
+                                align="center",
+                            ),
+                            on_submit=MainState.send_message,
+                            width="100%",
+                        ),
+                        max_width="880px",
+                        width="100%",
+                        margin_x="auto",
+                        padding_x="1em",
                     ),
                     width="100%",
-                    padding="1em",
-                    border_top="1px solid #e2e8f0",
+                    padding_y="1em",
+                    border_top=BORDER_SUBTLE,
                 ),
                 height="100vh",
                 width="100%",
                 spacing="0",
             ),
             margin_left="250px",
+            min_height="100vh",
+            height="100vh",
+            width="calc(100% - 250px)",
         ),
         # Upload modal
         rx.cond(
@@ -1069,7 +1034,7 @@ def chat_page():
                 rx.box(
                     rx.vstack(
                         rx.hstack(
-                            rx.heading("Upload PDF Document", size="5"),
+                            rx.heading("Upload PDF Documents", size="5"),
                             rx.spacer(),
                             rx.button("✕", on_click=MainState.toggle_upload, variant="ghost", size="2"),
                             width="100%",
@@ -1077,13 +1042,15 @@ def chat_page():
                         ),
                         rx.upload(
                             rx.vstack(
-                                rx.button("Choose PDF File", color_scheme="blue", size="2"),
-                                rx.text("or drag & drop PDF here", size="2", color="gray"),
+                                rx.button("Choose PDF Files", color_scheme="blue", size="2"),
+                                rx.text("or drag & drop one or more PDFs here", size="2", color="gray"),
                                 align="center",
                                 spacing="2",
                             ),
                             id="pdf_upload",
                             accept={"application/pdf": [".pdf"]},
+                            multiple=True,
+                            max_files=20,
                             border="2px dashed #cbd5e1",
                             padding="1.5em",
                             border_radius="8px",
@@ -1104,7 +1071,7 @@ def chat_page():
                         rx.hstack(
                             rx.button(
                                 "Upload & Process",
-                                on_click=MainState.handle_upload(rx.upload_files(upload_id="pdf_upload")),
+                                on_click=getattr(MainState, "handle_upload")(rx.upload_files(upload_id="pdf_upload")),  # NOSONAR
                                 is_loading=MainState.is_loading,
                                 loading_text="Uploading...",
                                 color_scheme="blue",
@@ -1143,65 +1110,9 @@ def chat_page():
                 z_index="1000",
             )
         ),
-        # Mindmap modal
-        rx.cond(
-            MainState.show_mindmap,
-            rx.box(
-                rx.box(
-                    rx.vstack(
-                        rx.hstack(
-                            rx.heading("Mindmap", size="6"),
-                            rx.spacer(),
-                            rx.button(
-                                "✕",
-                                on_click=MainState.toggle_mindmap,
-                                size="2",
-                            ),
-                            width="100%",
-                        ),
-                        rx.cond(
-                            MainState.mindmap_loading,
-                            rx.spinner(size="3"),
-                            rx.vstack(
-                                rx.foreach(
-                                    MainState.mindmap_items,
-                                    render_mindmap_item
-                                ),
-                                width="100%",
-                                max_height="70vh",
-                                overflow_y="auto",
-                                padding="1em",
-                                bg="white",
-                                border_radius="0.5em",
-                                spacing="2",
-                            ),
-                        ),
-                        spacing="3",
-                        width="100%",
-                    ),
-                    bg="white",
-                    padding="2em",
-                    border_radius="0.5em",
-                    box_shadow="lg",
-                    width="90vw",
-                    max_width="1200px",
-                    max_height="90vh",
-                ),
-                position="fixed",
-                top="50%",
-                left="50%",
-                transform="translate(-50%, -50%)",
-                bg="rgba(0,0,0,0.5)",
-                width="100vw",
-                height="100vh",
-                z_index="1000",
-                display="flex",
-                align_items="center",
-                justify_content="center",
-            )
-        ),
         on_mount=MainState.on_load,
     )
+
 
 app = rx.App()
 app.add_page(login_page, route="/")
