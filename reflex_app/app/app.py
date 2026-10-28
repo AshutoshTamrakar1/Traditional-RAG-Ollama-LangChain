@@ -769,7 +769,7 @@ def _render_welcome_screen():
     return rx.center(
         rx.vstack(
             rx.avatar(fallback="AI", size="5", variant="soft", color_scheme="violet"),
-            rx.heading("PDF RAG Assistant", size="6", weight="bold"),
+            rx.heading("Traditional RAG Assistant", size="6", weight="bold"),
             rx.text(
                 "Upload PDF documents or choose a chat from the sidebar to ask questions with grounded context.",
                 size="3",

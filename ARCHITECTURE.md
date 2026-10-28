@@ -1,6 +1,6 @@
 # Architecture Design Document
 
-## PDF RAG Chatbot v2.1 - Technical Architecture
+## Traditional RAG with Ollama and LangChain - Technical Architecture
 
 **Version**: 2.1.0  
 **Last Updated**: October 2026  
@@ -26,7 +26,7 @@
 ## System Overview
 
 ### Purpose
-A scalable, production-ready PDF chatbot system that enables users to upload PDF documents and have intelligent conversations using Retrieval-Augmented Generation (RAG) with local LLMs.
+A scalable, production-ready traditional PDF chatbot system that enables users to upload PDF documents and have intelligent conversations using dense Retrieval-Augmented Generation (RAG) with local LLMs.
 
 ### Key Characteristics
 - **Architecture Style**: Layered Architecture with clean Backend / Frontend separation
@@ -469,7 +469,7 @@ class SafeJsonOutputParser(BaseOutputParser[Any]):
 ```python
 class Settings(BaseSettings):
     # App
-    APP_NAME: str
+    APP_NAME: str = "Traditional RAG with Ollama and LangChain"
     ENVIRONMENT: str
     
     # Server
@@ -667,7 +667,7 @@ class Settings(BaseSettings):
 
 ### Directory Layout
 ```
-pdf-rag-chatbot-v1/
+traditional-rag-ollama-langchain/
 ├── backend/                   # FastAPI Backend Services
 │   ├── services/              # Domain service routers
 │   ├── ai_engine.py           # Core AI & RAG execution

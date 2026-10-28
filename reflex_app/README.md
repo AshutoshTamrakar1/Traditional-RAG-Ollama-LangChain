@@ -1,9 +1,11 @@
-# Reflex UI for PDF RAG Chatbot
+# Reflex UI - Traditional RAG with Ollama and LangChain
 
 ## Features
-- User authentication (login)
-- PDF upload and selection
-- RAG chat interface (ask questions about uploaded PDFs)
+- User authentication (JWT login & register)
+- Multi-PDF batch upload (up to 20 files) and selection
+- Traditional dense RAG chat interface with local Ollama models (`llama3`, `gemma`, `phi3`)
+- Rich Markdown rendering for AI responses
+- Active session switching with context and document restoration
 
 ## How to Run
 1. Install dependencies:
@@ -19,5 +21,4 @@
 
 ## Notes
 - Update `BACKEND_URL` in `app.py` if your backend runs on a different address.
-- This UI is minimal and can be extended for registration, session management, and better error handling.
-- The app will be available at `http://localhost:3000` by default.
+- The web app will be available at `http://localhost:3000` by default.

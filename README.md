@@ -1,12 +1,12 @@
-# PDF RAG Chatbot v2.1
+# Traditional RAG with Ollama and LangChain
 
-An enterprise-grade, production-ready PDF chatbot with **Retrieval-Augmented Generation (RAG)** capabilities. Built with FastAPI, LangChain 0.3+, and local LLMs via Ollama, this system enables intelligent conversations with your PDF documents using multiple AI models, persistent storage in MongoDB & ChromaDB, and a modern reactive Reflex UI.
+> **A production-ready traditional PDF RAG chatbot powered by local Ollama LLMs, LangChain LCEL, ChromaDB, and a modern Reflex UI.**
 
 ---
 
 ## 🎯 Overview
 
-This chatbot allows users to:
+This chatbot provides a complete, robust reference architecture for traditional dense Retrieval-Augmented Generation (RAG):
 - **Upload and query PDF documents** using natural language with high accuracy and local privacy
 - **Multi-document RAG** - Ingest and query across multiple PDFs simultaneously with source attribution
 - **Batch PDF Upload** - Centered modal dialog supporting up to 20 files with drag-and-drop and progress tracking
@@ -157,8 +157,8 @@ This chatbot allows users to:
 
 ### 1. Clone & Set Up Environment
 ```bash
-git clone <repository-url>
-cd pdf-rag-chatbot-v1
+git clone https://github.com/AshutoshTamrakar1/traditional-rag-ollama-langchain.git
+cd traditional-rag-ollama-langchain
 
 # Create and activate virtual environment
 python -m venv .venv
@@ -301,7 +301,7 @@ python scratch/e2e_test.py
 ## 📂 Project Structure
 
 ```
-pdf-rag-chatbot-v1/
+traditional-rag-ollama-langchain/
 ├── backend/                       # Dedicated backend application directory
 │   ├── pdfreader.py               # Main FastAPI application entry point
 │   ├── ai_engine.py               # Core AI operations (RAG, completions)

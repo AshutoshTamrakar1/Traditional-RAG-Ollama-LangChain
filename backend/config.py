@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     # APPLICATION SETTINGS
     # ========================================================================
     
-    APP_NAME: str = Field(default="PDF RAG Chatbot", env="APP_NAME")
+    APP_NAME: str = Field(default="Traditional RAG with Ollama and LangChain", env="APP_NAME")
     APP_VERSION: str = Field(default="2.0.0", env="APP_VERSION")
     ENVIRONMENT: str = Field(default="development", env="ENVIRONMENT")
     DEBUG: bool = Field(default=True, env="DEBUG")
