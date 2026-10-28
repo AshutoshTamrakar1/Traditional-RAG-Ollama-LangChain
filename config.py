@@ -15,10 +15,9 @@ class Settings(BaseSettings):
     Centralized application configuration using Pydantic BaseSettings.
     
     Note: Some configuration values are stored directly in other files:
-    - Session-related behavior (session cleanup/max age) → auth.py / db_manager.py
+    - Auth/token behavior → auth.py / db_manager.py
     - AI model configurations (model names, prompts) → ai_engine.py
     - RAG parameters (chunk size, overlap, top_k) → ai_engine.py
-    - TTS/STT settings → services/local_audio.py
     
     This file focuses on environment, server, database, and deployment settings.
     """
@@ -151,21 +150,6 @@ class Settings(BaseSettings):
     )
     
     # ========================================================================
-    # PODCAST OUTPUT SETTINGS
-    # ========================================================================
-    
-    PODCAST_OUTPUT_DIR: str = Field(
-        default="./podcasts",
-        env="PODCAST_OUTPUT_DIR",
-        description="Directory for generated podcast files"
-    )
-    PODCAST_API_URL: str = Field(
-        default="local_podcast",
-        env="PODCAST_API_URL",
-        description="Podcast API URL (local_podcast or remote API)"
-    )
-    
-    # ========================================================================
     # CORS SETTINGS
     # ========================================================================
     
@@ -188,21 +172,6 @@ class Settings(BaseSettings):
     )
     
     # ========================================================================
-    # WEBSOCKET SETTINGS
-    # ========================================================================
-    
-    WEBSOCKET_HEARTBEAT_INTERVAL: int = Field(
-        default=30,
-        env="WEBSOCKET_HEARTBEAT_INTERVAL",
-        description="WebSocket heartbeat interval in seconds"
-    )
-    WEBSOCKET_MAX_CONNECTIONS: int = Field(
-        default=1000,
-        env="WEBSOCKET_MAX_CONNECTIONS",
-        description="Maximum concurrent WebSocket connections"
-    )
-    
-    # ========================================================================
     # PERFORMANCE SETTINGS
     # ========================================================================
     
@@ -217,10 +186,6 @@ class Settings(BaseSettings):
     MINDMAP_GENERATION_TIMEOUT_SECONDS: int = Field(
         default=300,
         env="MINDMAP_GENERATION_TIMEOUT_SECONDS"
-    )
-    PODCAST_GENERATION_TIMEOUT_SECONDS: int = Field(
-        default=600,
-        env="PODCAST_GENERATION_TIMEOUT_SECONDS"
     )
     
     # ========================================================================
@@ -321,7 +286,6 @@ def create_upload_directories():
     
     directories = [
         settings.UPLOAD_DIR,
-        settings.PODCAST_OUTPUT_DIR,
         settings.CHROMA_PERSIST_DIR,
         "./logs"
     ]

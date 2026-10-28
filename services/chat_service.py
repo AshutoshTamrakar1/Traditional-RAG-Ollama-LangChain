@@ -1,13 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.concurrency import run_in_threadpool
 from typing import Dict, Any, Optional, List, AsyncGenerator, Tuple
 from pydantic import BaseModel
 from datetime import datetime
 
 from config import Settings, get_settings
 from .models import ChatRequest, ChatResponse
-from .exceptions import InvalidSessionError, ThreadNotFoundError
-from .utils import get_user_from_token, handle_service_error
+from .exceptions import ThreadNotFoundError
 from db_manager import (
     add_turn_to_general_chat,
     add_turn_to_multi_source_chat,
@@ -24,12 +22,6 @@ from ai_engine import (
     generate_chat_title,
     HISTORY_LENGTH
 )
-from callbacks import (
-    create_callback_manager,
-    PerformanceCallbackHandler,
-    LoggingCallbackHandler
-)
-from output_parsers import TitleOutputParser, ChatTitle
 from auth import get_current_user
 import uuid
 from logging_config import get_logger, log_exceptions
@@ -115,7 +107,7 @@ async def send_chat(
     current_user: str = Depends(get_current_user),
     settings: Settings = Depends(get_settings)
 ) -> ChatResponse:
-    """Handle chat messages with model selection support (llama3, gemma). phi3 is reserved for podcast generation."""
+    """Handle chat messages with model selection support (llama3, gemma)."""
     logger.info(f"Chat request received:")
     logger.info(f"  - user_id: {current_user[:20] if current_user else 'None'}...")
     logger.info(f"  - chat_session_id: {request.chat_session_id}")

@@ -1,14 +1,11 @@
-import os
-import json
 from typing import Any, Dict, Optional
 from pathlib import Path
 from fastapi import HTTPException, status, Header
-from datetime import datetime
 import jwt
 from jwt.exceptions import InvalidTokenError, ExpiredSignatureError
 
 # centralized logging + decorator import
-from logging_config import get_logger, log_exceptions
+from logging_config import get_logger
 from config import get_settings
 
 logger = get_logger(__name__)
@@ -17,15 +14,6 @@ settings = get_settings()
 # JWT Configuration
 JWT_SECRET_KEY = settings.JWT_SECRET_KEY
 JWT_ALGORITHM = settings.JWT_ALGORITHM
-
-
-class RequestSimulator:
-    """Utility class to simulate HTTP requests for service functions"""
-    def __init__(self, json_data: Dict[str, Any]):
-        self._json = json_data
-
-    async def json(self) -> Dict[str, Any]:
-        return self._json
 
 
 def verify_jwt_token(token: str) -> str:
@@ -97,18 +85,6 @@ async def get_user_from_token(authorization: Optional[str] = Header(None)) -> st
     return user_id
 
 
-async def validate_session(session_id: str, active_sessions: Dict) -> str:
-    """
-    DEPRECATED: Session-based validation replaced with JWT tokens.
-    This function is kept for backward compatibility during migration.
-    Use get_user_from_token() instead for JWT-based authentication.
-    """
-    logger.warning("validate_session() is deprecated. Please use JWT token authentication.")
-    raise HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Session-based authentication is no longer supported. Please use JWT tokens."
-    )
-
 def ensure_upload_dir(user_id: str, thread_id: str, source_id: str, base_dir: Path) -> Path:
     """Ensure upload directory exists and return path"""
     # Convert to Path if it's a string
@@ -117,6 +93,7 @@ def ensure_upload_dir(user_id: str, thread_id: str, source_id: str, base_dir: Pa
     upload_dir = base_dir / user_id / thread_id / source_id
     upload_dir.mkdir(parents=True, exist_ok=True)
     return upload_dir
+
 
 async def handle_service_error(func: callable, *args, **kwargs) -> Dict[str, Any]:
     """Generic error handler for service functions"""

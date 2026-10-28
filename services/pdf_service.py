@@ -1,15 +1,14 @@
-from fastapi import APIRouter, UploadFile, File, Form, Depends, Header
+from fastapi import APIRouter, UploadFile, File, Form, Depends
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 from fastapi import HTTPException
 from pathlib import Path
 import shutil
 from datetime import datetime
-from typing import Optional
 
 from config import Settings, get_settings
-from .exceptions import InvalidSessionError, ThreadNotFoundError
-from .utils import get_user_from_token, ensure_upload_dir
+from .exceptions import ThreadNotFoundError
+from .utils import ensure_upload_dir
 from db_manager import (
     add_source_to_chat_session,
     add_filename_to_uploaded_list,
@@ -22,7 +21,6 @@ from db_manager import (
 from auth import get_current_user
 import uuid
 from logging_config import get_logger, log_exceptions
-from callbacks import LoggingCallbackHandler
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["PDF Operations"])
@@ -204,7 +202,6 @@ async def upload_pdf(
             "filepath": str(file_path),
             "related_questions": [],
             "mindmap": {"path": None, "chat_messages": []},
-            "podcast": {"data": None}
         }
 
         # DB writes — use async db_manager functions

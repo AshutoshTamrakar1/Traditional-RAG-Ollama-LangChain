@@ -1,24 +1,18 @@
-from fastapi import APIRouter, Depends, HTTPException, status
-from typing import Dict, Any, Optional
-import logging
+from fastapi import APIRouter, Depends, HTTPException
 from pathlib import Path
-from datetime import datetime
 
 from config import Settings, get_settings
 from .models import MindmapRequest, MindmapResponse
 from .exceptions import ThreadNotFoundError, SourceNotFoundError
-from .utils import get_user_from_token
 from db_manager import (
     update_source_field,
     get_chat_session_by_id
 )
-from fastapi.concurrency import run_in_threadpool
 from ai_engine import (
     generate_mindmap_from_pdf,
     estimate_mindmap_generation_time
 )
-from output_parsers import MindmapOutputParser, MindmapOutput
-from callbacks import create_callback_manager
+from output_parsers import MindmapOutputParser
 from auth import get_current_user
 from logging_config import get_logger, log_exceptions
 

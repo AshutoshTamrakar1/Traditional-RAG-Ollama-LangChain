@@ -6,7 +6,6 @@ from pathlib import Path
 from services.pdf_service import router as pdf_router
 from services.chat_service import router as chat_router
 from services.mindmap_service import router as mindmap_router
-#from services.websocket_handler import router as ws_router
 
 # Import auth and config
 from auth import router as auth_router
@@ -21,7 +20,7 @@ logger = get_logger(__name__)
 # Create FastAPI app
 app = FastAPI(
     title="PDF Reader",
-    description="Local PDF RAG Bot with Chat, Mindmap, and Podcast features",
+    description="Local PDF RAG Bot with Chat and Mindmap features",
     version="1.0.0"
 )
 
@@ -39,9 +38,6 @@ app.include_router(auth_router, prefix="/auth", tags=["Authentication"])
 app.include_router(pdf_router, prefix="/pdf", tags=["PDF Operations"])
 app.include_router(chat_router, prefix="/chat", tags=["Chat Operations"])
 app.include_router(mindmap_router, prefix="/mindmap", tags=["Mindmap Operations"])
-""" Disabled non-core features: podcast, websocket
-app.include_router(ws_router, prefix="/ws", tags=["WebSocket"])
-"""
 
 # Startup event
 @app.on_event("startup")
@@ -93,4 +89,4 @@ if __name__ == "__main__":
         reload=False,  # Disabled reload to prevent constant reloading
         timeout_keep_alive=600,  # 10 minutes keep-alive for long operations
         log_level="info"
-    )
+    )

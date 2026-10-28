@@ -89,24 +89,6 @@ MINDMAP_PROMPT_TEMPLATE: Final[str] = (
     "DOCUMENT TEXT:\n{pdf_text}\n\nGenerate ONLY the Mermaid mindmap code:" 
 )
 
-# Podcast/podcast script prompt template (phi3 model)
-PODCAST_SCRIPT_PROMPT_TEMPLATE: Final[str] = (
-    "You are a professional podcast scriptwriter. Create an engaging, informative dialogue between two podcast hosts named Jess and Leo discussing the topics below.\n\n"
-    "RULES:\n"
-    "1. Write natural, conversational dialogue that explains concepts clearly\n"
-    "2. Include questions and follow-up discussions that build understanding\n"
-    "3. Use proper grammar and punctuation\n"
-    "4. Format EXACTLY as: Jess: [dialogue] Leo: [dialogue]\n"
-    "5. Each speaker should have 2-4 sentences per turn\n"
-    "6. Make it educational yet entertaining - like a real podcast\n"
-    "7. Include brief [laughs] or [pause] for natural flow\n"
-    "8. Start with a greeting: \"Welcome to our podcast about...\"\n"
-    "9. End with: \"Thanks for listening! If you'd like to implement this content in your application, contact our team.\"\n\n"
-    "TOPICS TO DISCUSS:\n{mindmap_md}\n\n"
-    "IMPORTANT: Create a coherent discussion that covers the main points from the topics above. Make it sound like real podcast hosts discussing this topic naturally.\n\n"
-    "Now write the podcast script:\n"
-)
-
 # Title generation prompt template
 TITLE_GENERATION_PROMPT_TEMPLATE = PromptTemplate.from_template(
     "Based on the following conversation, generate a short, concise title (4-5 words max).\n"

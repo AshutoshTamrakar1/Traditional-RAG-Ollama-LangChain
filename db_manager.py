@@ -84,10 +84,6 @@ class MongoDBManager:
                 # Non-fatal — log and continue
                 logger.debug(f"No legacy id_1 index to drop or error checking indexes: {e}")
 
-            if "sessions" not in existing:
-                await self._db.create_collection("sessions")
-                logger.info("Created 'sessions' collection")
-
             if "pdf_metadata" not in existing:
                 await self._db.create_collection("pdf_metadata")
                 logger.info("Created 'pdf_metadata' collection")
@@ -112,16 +108,6 @@ class MongoDBManager:
             await self._db.chat_sessions.create_index("user_id", background=True)
             await self._db.chat_sessions.create_index("created_at", background=True)
             await self._db.chat_sessions.create_index([("user_id", DESCENDING), ("created_at", DESCENDING)], background=True)
-
-            # Create indexes for sessions collection
-            # Use partial index to skip documents missing session_id (pre-existing NULLs)
-            await self._db.sessions.create_index(
-                "session_id",
-                unique=True,
-                partialFilterExpression={"session_id": {"$type": "string"}}
-            )
-            await self._db.sessions.create_index("user_id", background=True)
-            await self._db.sessions.create_index("created_at", background=True)
 
             # Create indexes for pdf metadata
             await self._db.pdf_metadata.create_index("pdf_id", unique=True)
@@ -161,9 +147,6 @@ COLLECTION_USERS = "users"
 COLLECTION_CHAT_SESSIONS = "chat_sessions"
 COLLECTION_PDF_METADATA = "pdf_metadata"
 COLLECTION_REVOKED_TOKENS = "revoked_tokens"
-
-# Note: Session management has been migrated to JWT tokens (stateless authentication)
-# The COLLECTION_SESSIONS and related functions have been removed
 
 # PDF METADATA FUNCTIONS
 @log_exceptions
@@ -355,7 +338,6 @@ async def add_source_to_chat_session(chat_session_id: str, source: Dict[str, Any
     source.setdefault("uploaded_at", datetime.utcnow().isoformat())
     source.setdefault("related_questions", [])
     source.setdefault("mindmap", {"path": None, "chat_messages": []})
-    source.setdefault("podcast", {"data": None})
     
     result = await _db_manager.db[COLLECTION_CHAT_SESSIONS].update_one(
         {"chat_session_id": chat_session_id, "deleted": False},

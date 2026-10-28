@@ -58,31 +58,19 @@ AVAILABLE_MODELS = {
     "phi3": phi3_llm
 }
 
-# Chat models only (phi3 reserved for podcast generation)
+# Chat models (phi3 is used for mindmap generation)
 CHAT_MODELS = {
     "llama3": llama3_llm,
     "gemma": gemma_llm
 }
 
 def get_available_models() -> List[str]:
-    """Return list of available chat model names (excludes phi3 which is for podcasts)"""
+    """Return list of available chat model names"""
     return list(CHAT_MODELS.keys())
 
 def get_model_llm(model_name: str):
     """Get LLM instance by model name, defaults to llama3"""
     return CHAT_MODELS.get(model_name, llama3_llm)
-
-def get_podcast_model():
-    """Get the dedicated podcast generation model (phi3)"""
-    return phi3_llm
-
-# --- Podcast prompt (moved) ---
-# The PODCAST_SCRIPT_PROMPT_TEMPLATE used to live here but was moved to `prompts.py`
-# (see `prompts.PODCAST_SCRIPT_PROMPT_TEMPLATE`). Keep the code here minimal and import
-# the template from prompts.py when enabling podcast generation features.
-
-# --- Mindmap Generation Prompt ---
-# Imported from prompts.py (MINDMAP_PROMPT_TEMPLATE)
 
 # --- Estimation functions ---
 def estimate_mindmap_generation_time(pdf_path: str) -> int:
@@ -108,23 +96,6 @@ def estimate_mindmap_generation_time(pdf_path: str) -> int:
     except Exception as e:
         logger.error(f"Could not estimate mindmap time for {pdf_path}: {e}")
         return 45
-
-def estimate_podcast_generation_time(mindmap_md: str) -> int:
-    if not mindmap_md:
-        return 45
-    char_count = len(mindmap_md)
-    line_count = mindmap_md.count('\n') + 1
-    base_time_seconds = 30
-    time_per_char = 1/12
-    time_per_line = 0.5
-    estimated_time = base_time_seconds + (char_count * time_per_char) + (line_count * time_per_line)
-    max_time_seconds = 480
-    final_time = min(int(estimated_time), max_time_seconds)
-    logger.info(
-        f"Estimated podcast generation time for mindmap with {char_count} chars and "
-        f"{line_count} lines: {final_time}s"
-    )
-    return final_time
 
 # --- RAG Helper Functions ---
 def _get_collection_name(pdf_path: str) -> str:
@@ -223,8 +194,6 @@ async def chat_completion_LlamaModel_ws(
             async for chunk in chain.astream(chain_input):
                 if chunk:
                     full_response += chunk
-                    # Yield incremental chunks (for real-time streaming)
-                    # WebSocket handler expects (answer, error) tuple
             
             # Yield complete response
             yield full_response, None
@@ -270,21 +239,6 @@ async def chat_completion_Gemma_ws(
     except Exception as e:
         logger.error(f"Gemma Chat: {e}", exc_info=True)
         yield None, f"Error during Gemma chat completion: {e}"
-
-# --- Phi3 Completion (RESERVED FOR PODCAST GENERATION ONLY) ---
-async def chat_completion_phi3_ws(text: str, history: List[Dict[str, str]]) -> AsyncGenerator[Tuple[Optional[str], Optional[str]], None]:
-    logger.info(f"Initiating Phi3 WS completion for text: '{text[:50]}...'")
-    try:
-        messages_to_send = history[-(HISTORY_LENGTH * 2):]
-        if messages_to_send and messages_to_send[0]['role'] == 'assistant':
-            messages_to_send.pop(0)
-        prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages_to_send]) + f"\nuser: {text}"
-        response = await asyncio.to_thread(phi3_llm.generate, [prompt])
-        answer = response.generations[0][0].text.strip()
-        yield answer, None
-    except Exception as e:
-        logger.error(f"Phi3 Chat: {e}", exc_info=True)
-        yield None, f"Error during Phi3 chat completion: {e}"
 
 async def chat_completion_with_pdf_ws(
     text: str,
@@ -491,18 +445,6 @@ async def generate_mindmap_from_pdf(pdf_path: str) -> Tuple[Optional[str], Optio
         logger.error(error_msg, exc_info=True)
         return None, error_msg
 
-""" Disabled podcast generation functions as per user request
-# --- Mindmap Generation using phi3 ---
-# async def generate_mindmap_from_pdf(pdf_path: str) -> Tuple[Optional[str], Optional[str]]:
-#     ...
-# --- Podcast Generation using phi3 + local TTS ---
-# import base64
-# import tempfile
-# from services.local_audio import generate_tts_audio
-# async def generate_podcast_from_mindmap(mindmap_md: str) -> Tuple[Optional[Dict[str, str]], Optional[str]]:
-#     ...
-"""
-
 # --- Title Generation using llama3 ---
 async def generate_chat_title(messages_for_title_generation: List[Dict[str, str]]) -> Optional[str]:
     """
@@ -540,7 +482,5 @@ async def generate_chat_title(messages_for_title_generation: List[Dict[str, str]
     except Exception as e:
         logger.error(f"Failed to generate chat title: {e}", exc_info=True)
         return None
-
-# Prompt constants are imported from prompts.py at the top of this file
 
 logger.info("ai_engine.py loaded with local Ollama models: llama3, gemma, phi3.")
