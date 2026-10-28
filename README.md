@@ -15,7 +15,6 @@ This chatbot allows users to:
 - **User authentication** - Secure JWT tokens with access & refresh token rotation and token revocation in MongoDB
 - **Persistent conversation history** - Stored in MongoDB with sliding window memory for follow-up questions
 - **Multiple AI models** - Run local LLMs (`llama3`, `gemma`, `phi3`) via Ollama with zero external API costs
-- **Mindmap generation** - Automatically generate structured mindmaps from PDF documents
 - **Clean Code Architecture** - SonarLint / SonarQube compliant with cognitive complexity <= 15 and modern type annotations
 
 ---
@@ -50,23 +49,23 @@ This chatbot allows users to:
                                ⬇
 ┌─────────────────────────────────────────────────────────────────┐
 │               Service Layer (backend/services/)                 │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
-│  │ pdf_service  │  │ chat_service │  │mindmap_servic│         │
-│  │ •Batch Upload│  │ •Multi-PDF   │  │•Generate     │         │
-│  │ •Sessions    │  │ •RAG Routing │  │ from PDF     │         │
-│  └──────────────┘  └──────────────┘  └──────────────┘         │
+│  ┌──────────────────────────────┐  ┌──────────────────────────┐ │
+│  │          pdf_service         │  │       chat_service       │ │
+│  │  • Batch Upload              │  │  • Multi-PDF RAG         │ │
+│  │  • Session Lifecycle         │  │  • Conversation Routing  │ │
+│  └──────────────────────────────┘  └──────────────────────────┘ │
 │                            ⬇                                    │
-│  ┌──────────────────────────────────────────────────┐          │
-│  │          Auth Service (backend/auth.py)          │          │
-│  │  •JWT Rotation  •Bcrypt Hashing  •JTI Blacklist  │          │
-│  └──────────────────────────────────────────────────┘          │
+│  ┌────────────────────────────────────────────────────────────┐ │
+│  │               Auth Service (backend/auth.py)               │ │
+│  │  • JWT Rotation  • Bcrypt Hashing  • JTI Blacklist         │ │
+│  └────────────────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────┘
                                ⬇
 ┌─────────────────────────────────────────────────────────────────┐
 │               Business Logic Layer (backend/)                   │
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │                    ai_engine.py                           │  │
-│  │  •Chat Completion  •Multi-PDF RAG  •Mindmap Extraction   │  │
+│  │  • Chat Completion  • Multi-PDF RAG Orchestration        │  │
 │  └──────────────────────────────────────────────────────────┘  │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐         │
 │  │  chains.py   │  │ prompts.py   │  │ callbacks.py │         │
@@ -121,7 +120,6 @@ This chatbot allows users to:
 - ✅ **Isolated Collections**: Vectorstore collections keyed by unique `source_id` to prevent document collisions across users and sessions.
 - ✅ **Conversational RAG Memory**: Follow-up queries retain conversational context via sliding window memory within LCEL chains.
 - ✅ **Multi-Document RAG**: Query across multiple PDFs simultaneously with model selection support (`llama3`, `gemma`, `phi3`).
-- ✅ **Mindmap Extraction**: Automated mindmap generation from PDF content with regex post-processing and indentation normalization.
 - ✅ **Session Context Restoration**: Restores active document IDs and conversation history seamlessly when switching chats from the sidebar.
 - ✅ **SonarQube / SonarLint Compliant**: Clean code architecture with cognitive complexity <= 15 across all functions, `typing.Annotated` dependencies, and timezone-aware UTC dates.
 
@@ -282,11 +280,6 @@ Authorization: Bearer <access_token>
 | `POST` | `/chat/generate-title` | Auto-generate session title based on conversation |
 | `GET`  | `/chat/models` | List available Ollama models |
 
-### 🗺️ Mindmap (`/mindmap`)
-| Method | Endpoint | Description |
-|---|---|---|
-| `POST` | `/mindmap/generate` | Generate mindmap outline from uploaded PDF |
-
 ---
 
 ## 🧪 Testing
@@ -298,7 +291,7 @@ pytest tests
 ```
 
 ### End-to-End Suite
-To run the automated 41-check end-to-end backend verification (testing auth, upload validation, single & multi-PDF RAG, memory retention, mindmap parsing, session deletion, and token revocation):
+To run the automated end-to-end backend verification (testing auth, upload validation, single & multi-PDF RAG, memory retention, session deletion, and token revocation):
 ```bash
 python scratch/e2e_test.py
 ```
@@ -311,23 +304,22 @@ python scratch/e2e_test.py
 pdf-rag-chatbot-v1/
 ├── backend/                       # Dedicated backend application directory
 │   ├── pdfreader.py               # Main FastAPI application entry point
-│   ├── ai_engine.py               # Core AI operations (RAG, completions, mindmap)
+│   ├── ai_engine.py               # Core AI operations (RAG, completions)
 │   ├── chains.py                  # LangChain LCEL chains with history
 │   ├── prompts.py                 # LLM prompt templates
 │   ├── callbacks.py               # Observability and performance callbacks
-│   ├── output_parsers.py          # Structured output & mindmap parsing
+│   ├── output_parsers.py          # Structured output parsing
 │   ├── memory_manager.py          # MongoDB conversation memory
 │   ├── vectorstore_manager.py     # ChromaDB & offline embeddings management
 │   ├── db_manager.py              # MongoDB async CRUD & token revocation
 │   ├── auth.py                    # JWT security & password hashing
 │   ├── config.py                  # Centralized configuration via Pydantic
 │   ├── logging_config.py          # Logging configuration & exception decorators
-│   ├── requirements.txt           # Python dependencies
+│   ├── requirements.txt           # Backend dependencies
 │   │
 │   ├── services/                  # Modular API service routers
 │   │   ├── pdf_service.py         # PDF upload, session listing & cleanup
 │   │   ├── chat_service.py        # Chat & RAG query endpoints
-│   │   ├── mindmap_service.py     # Mindmap generation endpoint
 │   │   ├── models.py              # Pydantic request/response schemas
 │   │   ├── exceptions.py          # Domain exceptions
 │   │   └── utils.py               # Shared service utilities
@@ -342,7 +334,6 @@ pdf-rag-chatbot-v1/
 │   └── rxconfig.py                # Reflex project configuration
 │
 ├── tests/                         # Automated test suite
-│   └── test_mindmap_normalizer.py # Mindmap parsing unit tests
 │
 ├── ARCHITECTURE.md                # System Architecture & Technical Specifications
 └── README.md                      # Project documentation and setup guide

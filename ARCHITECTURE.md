@@ -82,7 +82,6 @@ A scalable, production-ready PDF chatbot system that enables users to upload PDF
 /auth/*        → Authentication endpoints
 /pdf/*         → PDF operations
 /chat/*        → Chat and RAG queries
-/mindmap/*     → Mindmap generation
 ```
 
 **Middleware Stack:**
@@ -147,31 +146,12 @@ send_chat()
 
 ---
 
-#### 3.3 Mindmap Service (`backend/services/mindmap_service.py`)
-
-**Endpoints:**
-- `POST /mindmap/generate` - Generate mindmap from PDF
-
-**Key Operations:**
-```python
-generate_mindmap()
-  → get_current_user() [JWT dependency]
-  → estimate_generation_time()
-  → ai_engine.generate_mindmap_from_pdf()
-  → MindmapOutputParser.parse()
-  → db_manager.update_source_field()
-```
-
----
-
-#### 3.4 Supporting Modules
+#### 3.3 Supporting Modules
 
 **`backend/services/models.py`** - Pydantic Models
 ```python
 ChatRequest
 ChatResponse
-MindmapRequest
-MindmapResponse
 BaseRequest (with validation)
 ```
 
@@ -215,11 +195,6 @@ chat_completion_with_multiple_pdfs_ws()
   → vectorstore_manager.search_multiple_collections()
   → chains.create_multi_pdf_rag_chain_with_history()
   → Merged context streaming
-
-generate_mindmap_from_pdf()
-  → Load PDF with PyMuPDF
-  → Apply MINDMAP_PROMPT_TEMPLATE
-  → Parse structured output
 
 _load_and_store_pdf()
   → PyMuPDFLoader.load()
@@ -445,7 +420,6 @@ RAG_PROMPT_TEMPLATE = ChatPromptTemplate.from_messages([
     )
 ])
 
-MINDMAP_PROMPT_TEMPLATE = PromptTemplate(...)
 TITLE_GENERATION_PROMPT = PromptTemplate(...)
 ```
 
@@ -481,9 +455,6 @@ class PerformanceCallbackHandler(BaseCallbackHandler):
 ```python
 class TitleOutputParser(BaseOutputParser[ChatTitle]):
     parse() → Extract title from LLM response
-    
-class MindmapOutputParser(BaseOutputParser[MindmapOutput]):
-    parse() → Extract JSON mindmap structure
     
 class SafeJsonOutputParser(BaseOutputParser[Any]):
     parse() → Fault-tolerant JSON extraction
@@ -562,8 +533,7 @@ class Settings(BaseSettings):
             "source_id": str,
             "filename": str,
             "filepath": str,
-            "uploaded_at": datetime,
-            "mindmap": dict (optional)
+            "uploaded_at": datetime
         }
     ],
     "turns": [
@@ -626,7 +596,6 @@ class Settings(BaseSettings):
 1. POST /pdf/session → {chat_session_id}
 2. POST /pdf/upload → {source_id, filename}
 3. POST /chat/send → {answer, streaming}
-4. POST /mindmap/generate → {mindmap_data}
 ```
 
 ---
